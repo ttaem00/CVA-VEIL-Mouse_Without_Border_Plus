@@ -1117,7 +1117,7 @@ namespace MouseWithoutBorders
         private void CheckBoxMouseMoveRelatively_CheckedChanged(object sender, EventArgs e)
         {
             Setting.Values.MoveMouseRelatively = checkBoxMouseMoveRelatively.Checked;
-            ShowUpdateMessage();
+            if (formShown && !reloadingSharedSettings) Setting.Values.SaveSettings();
         }
 
         private void CheckBoxDrawMouse_CheckedChanged(object sender, EventArgs e)

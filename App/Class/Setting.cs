@@ -72,7 +72,7 @@ namespace MouseWithoutBorders.Class
 
         internal SharedSettingsSnapshot SharedSnapshot()
         {
-            lock (_loadingSettingsLock) return SharedSettingsSnapshot.Capture(_properties);
+            lock (_loadingSettingsLock) return SharedSettingsSnapshot.CaptureForPeer(_properties);
         }
 
         internal int[] GetShortcutKeys(KeyboardAction action)
@@ -132,7 +132,7 @@ namespace MouseWithoutBorders.Class
                 AddPairingMembers(candidate, Common.MachineName, peerName);
                 SetPairingAddress(candidate, peerName, address);
                 string values = StampSharedSettings(candidate);
-                var group = new PairingGroup(candidate.SecurityKey.Value, candidate.TCPPort.Value, SharedSettingsSnapshot.Capture(candidate));
+                var group = new PairingGroup(candidate.SecurityKey.Value, candidate.TCPPort.Value, SharedSettingsSnapshot.CaptureForPeer(candidate));
                 SavePairedProperties(candidate, values);
                 return group;
             }
