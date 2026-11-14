@@ -330,7 +330,7 @@ internal partial class FrmMatrix
                 Setting.Values.DisableEasyMouseWhenForegroundWindowIsFullscreen = blockFullscreenSwitching.Checked;
                 ShowUpdateMessage();
             };
-            AddOption(mouse, checkBoxMouseMoveRelatively, "Off", "When controlling one PC, send movement distances from the first move. Turn on before controlling a 3D game. This setting is shared with connected PCs.");
+            AddOption(mouse, checkBoxMouseMoveRelatively, "Off", "Send movement distances when using this PC's mouse to control one other PC. Turn on to control a 3D game. This choice is saved on this PC.");
             AddOption(mouse, checkBoxHideMouse, "On", "Hide the pointer on this PC while controlling another.");
             checkBoxDrawMouse.Text = "Use a replacement cursor on this PC";
             AddOption(mouse, checkBoxDrawMouse, "On", "Only needed when Windows cannot show a cursor. Keep this off when the Windows cursor works. This choice is saved on this PC only.");

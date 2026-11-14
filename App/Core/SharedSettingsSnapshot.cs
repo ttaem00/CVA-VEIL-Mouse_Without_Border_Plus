@@ -17,9 +17,9 @@ internal sealed class SharedSettingsSnapshot
     public Dictionary<string, JsonElement> Values { get; set; } = new();
     public MonitorDescriptor[] Displays { get; set; }
 
-    // Only group preferences cross the wire. Identity, secrets, paths and network mappings remain local.
+    // These preferences have a shared revision and are adopted from peers.
     internal static readonly PropertyInfo[] Fields = ("MachineMatrixString MonitorOrigins MatrixOneRow WrapMouse ShareClipboard TransferFile LimitAutomaticClipboardFileSize " +
-        "HideMouseAtScreenEdge BlockScreenSaverOnOtherMachines MoveMouseRelatively BlockMouseAtScreenCorners " +
+        "HideMouseAtScreenEdge BlockScreenSaverOnOtherMachines BlockMouseAtScreenCorners " +
         "EasyMouse EasyMouseActivationKeys KeyboardShortcutsEnabled HotKeySwitchMachine ToggleEasyMouseShortcut " +
         "LockMachineShortcut ReconnectShortcut Switch2AllPCShortcut DisableEasyMouseWhenForegroundWindowIsFullscreen ShortcutKeys")
         .Split(' ').Select(name => typeof(MouseWithoutBordersProperties).GetProperty(name)!).ToArray();
@@ -30,6 +30,15 @@ internal sealed class SharedSettingsSnapshot
         Values = Fields.ToDictionary(field => field.Name, field => JsonSerializer.SerializeToElement(
             field.Name == "MachineMatrixString" ? properties.MachineMatrixString.Concat(Enumerable.Repeat("", 4 - properties.MachineMatrixString.Count)).ToList() : field.GetValue(properties), field.PropertyType, SettingsUtils.SerializerOptions)),
     };
+
+    internal static SharedSettingsSnapshot CaptureForPeer(MouseWithoutBordersProperties properties)
+    {
+        var snapshot = Capture(properties);
+        // Older readers require this field. Current readers keep their own movement mode.
+        snapshot.Values.Add(nameof(MouseWithoutBordersProperties.MoveMouseRelatively),
+            JsonSerializer.SerializeToElement(properties.MoveMouseRelatively, SettingsUtils.SerializerOptions));
+        return snapshot;
+    }
 
     internal MouseWithoutBordersProperties ReadValues()
     {

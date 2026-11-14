@@ -212,6 +212,7 @@ public sealed class SharedSettingsTests
         first.EasyMouseActivationKeys = [(int)System.Windows.Forms.Keys.CapsLock];
         first.ShareClipboard = false; first.TransferFile = false;
         first.DrawMouse = false; late.DrawMouse = true;
+        first.MoveMouseRelatively = true;
         first.HotKeyReconnect = new HotkeySettings(false, true, true, false, 'R');
         first.CommitSharedSettings();
         var current = first.SharedSnapshot();
@@ -221,6 +222,9 @@ public sealed class SharedSettingsTests
         CollectionAssert.AreEqual(first.EasyMouseActivationKeys, late.EasyMouseActivationKeys);
         Assert.IsFalse(late.ShareClipboard); Assert.IsFalse(late.TransferFile);
         Assert.IsTrue(late.DrawMouse, "A peer must not replace this PC's cursor renderer choice.");
+        Assert.IsFalse(late.MoveMouseRelatively, "The PC with the physical mouse chooses how it sends movement.");
+        Assert.IsTrue(current.Values["MoveMouseRelatively"].GetBoolean(),
+            "The legacy wire field must remain readable by RC22.");
         Assert.AreEqual(first.HotKeyReconnect.Code, late.HotKeyReconnect.Code);
         Assert.AreEqual("test-key-C", late.MyKey);
         Assert.AreEqual(303, late.MachineId);
@@ -236,6 +240,8 @@ public sealed class SharedSettingsTests
         long revision = first.SharedSnapshot().Revision;
         first.DrawMouse = true; first.CommitSharedSettings(); first.SaveSettingsSynchronously();
         Assert.AreEqual(revision, first.SharedSnapshot().Revision, "Local cursor edits must not publish a shared revision.");
+        first.MoveMouseRelatively = false; first.CommitSharedSettings();
+        Assert.AreEqual(revision, first.SharedSnapshot().Revision, "Local movement edits must not publish a shared revision.");
         first.DrawMouse = false; first.SaveSettingsSynchronously();
         Assert.IsFalse(new MouseWithoutBorders.Class.Settings(new SettingsUtils(Path.Combine(folder, "A.json")), false).DrawMouse);
         string wire = JsonSerializer.Serialize(current);
