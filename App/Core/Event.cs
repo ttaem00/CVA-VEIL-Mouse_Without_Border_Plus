@@ -151,12 +151,6 @@ internal static class Event
         }
 
         bool relative = Setting.Values.MoveMouseRelatively;
-        if (relative && !allowSharing)
-        {
-            // The held key moves the layout position. Ordinary gameplay only sends distances.
-            SendRelativeMouse((ID)peer, e, dx, dy);
-            return Common.DesMachineID != Common.MachineID;
-        }
 
         MonitorPlacement current = default;
         bool found = false;
@@ -182,6 +176,7 @@ internal static class Event
         MonitorPosition position;
         if (e.dwFlags == WM.WM_MOUSEMOVE)
         {
+            // Keep tracking the current peer while relative input is sent. CanEnterPeer gates PC changes.
             position = RouteMouseMove(layout, current.Key, monitorPoint, proposed, CanEnterPeer);
             myLastX = e.X; myLastY = e.Y;
             if (position.Monitor.Key.Peer != peer &&

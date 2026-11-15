@@ -375,6 +375,48 @@ public sealed class MonitorInputIntegrationTests
     }
 
     [TestMethod]
+    public void RelativeMotionTracksRemoteMonitorsBeforeCapsLockReturnsToTheController()
+    {
+        using var main = new QueuedPeer(202);
+        var transport = QueueTransport(main.Peer);
+        MonitorTopology.ApplyOrigins([new(101, "A1", 2560, -1440), new(202, "B1", 0, 0), new(202, "B2", 0, -1440)]);
+        synthetic.EasyMouse = (int)EasyMouseOption.Custom;
+        synthetic.EasyMouseActivationKeys = [20];
+        synthetic.MoveMouseRelatively = true;
+        MachineStuff.desMachineID = MachineStuff.newDesMachineID = (ID)202;
+        typeof(Event).GetField("activeMonitor", StaticFields)!.SetValue(null, new MonitorKey(202, "B1"));
+        typeof(Event).GetField("monitorPoint", StaticFields)!.SetValue(null, new Point(2500, 70));
+        var parked = Common.LastPos = new Point(400, 400);
+        var hook = (InputHook)RuntimeHelpers.GetUninitializedObject(typeof(InputHook));
+        GC.SuppressFinalize(hook);
+        hook.MouseEvent += Event.MouseEvent;
+        hook.KeyboardEvent += _ => { };
+        var held = (HeldKeyChord)typeof(InputHook).GetField("easyMouseKeys", StaticFields)!.GetValue(null)!;
+        var previousKeys = held.DownKeys;
+        var nativePosition = Point.Empty;
+        bool canRestorePosition = NativeMethods.GetCursorPos(ref nativePosition);
+        try
+        {
+            held.Clear();
+            InvokeMouse(hook, WM.WM_MOUSEMOVE, new Point(parked.X, parked.Y - 140), 0);
+            InvokeMouse(hook, WM.WM_MOUSEMOVE, new Point(parked.X + 100, parked.Y), 0);
+            Assert.AreEqual((ID)202, Common.DesMachineID, "Ordinary relative motion must not cross to another PC.");
+
+            InvokeKeyboard(hook, 20, false);
+            InvokeMouse(hook, WM.WM_MOUSEMOVE, new Point(parked.X + 30, parked.Y), 0);
+            Assert.AreEqual((ID)101, Common.DesMachineID, "The return must use the remote monitor reached before Caps Lock was held.");
+            InvokeKeyboard(hook, 20, true);
+            WaitForInput(transport);
+        }
+        finally
+        {
+            held.Clear();
+            foreach (int key in previousKeys) held.Update(key, true);
+            if (canRestorePosition) NativeMethods.SetCursorPos(nativePosition.X, nativePosition.Y);
+        }
+    }
+
+    [TestMethod]
     public void RecordedCapsLockReconnectRunsOncePerPressAndRespectsTheMasterSwitch()
     {
         var held = (HeldKeyChord)typeof(InputHook).GetField("easyMouseKeys", StaticFields)!.GetValue(null)!;
