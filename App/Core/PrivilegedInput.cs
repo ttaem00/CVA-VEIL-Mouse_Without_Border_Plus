@@ -356,7 +356,9 @@ internal static class PrivilegedInput
 
     private static void RunAgent(string stopEventName, SecurityIdentifier user)
     {
-        int session = Process.GetCurrentProcess().SessionId;
+        using var process = Process.GetCurrentProcess();
+        process.PriorityClass = ProcessPriorityClass.High;
+        int session = process.SessionId;
         agentAllowsApprovalScreens = ApprovalScreensAllowed();
         using var stop = EventWaitHandleAcl.OpenExisting(stopEventName, EventWaitHandleRights.Synchronize);
         NamedPipeServerStream server = null;
