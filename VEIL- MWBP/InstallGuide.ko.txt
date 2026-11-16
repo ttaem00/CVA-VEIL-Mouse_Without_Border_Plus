@@ -1,4 +1,4 @@
-MWBP 1.2.0-rc.23 — 설치 안내
+MWBP 1.2.0-rc.24 — 설치 안내
 
 PowerToys의 Mouse Without Borders를 기반으로 수정한 비공식 프로젝트입니다. Microsoft와 제휴하거나 보증받은 제품이 아닙니다.
 
