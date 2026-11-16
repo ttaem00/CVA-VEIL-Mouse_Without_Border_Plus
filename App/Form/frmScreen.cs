@@ -60,6 +60,7 @@ namespace MouseWithoutBorders
         {
             lock (cursorUpdateLock)
             {
+                if (point.X == int.MinValue && point == latestCursorPoint) return;
                 latestCursorPoint = point;
                 if (cursorUpdatePending) return;
                 cursorUpdatePending = true;

@@ -103,6 +103,12 @@ public sealed class CursorOverlayTests
 
                 CustomCursor.ShowFakeMouseCursor(int.MinValue, int.MinValue);
                 Assert.IsNull(Common.MouseCursorForm, "Hiding before the first remote input must not create an overlay.");
+                var queuedHide = typeof(MouseWithoutBorders.FrmScreen).GetField("cursorUpdatePending", BindingFlags.Instance | BindingFlags.NonPublic)!;
+                Task.Run(() =>
+                {
+                    for (int i = 0; i < 10000; i++) CustomCursor.ShowFakeMouseCursor(int.MinValue, int.MinValue);
+                }).GetAwaiter().GetResult();
+                Assert.IsFalse((bool)queuedHide.GetValue(main)!, "An already hidden cursor must not post another UI callback for each input burst.");
                 CustomCursor.RenderMouseCursor(new Point(100, 120), false);
                 overlay = Common.MouseCursorForm;
                 Assert.IsNotNull(overlay);
