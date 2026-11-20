@@ -28,6 +28,7 @@ internal static class PrivilegedInput
     internal const string UninstallArgument = "--mwb-input-uninstall";
     internal const string ServiceRegistryPath = @"SYSTEM\CurrentControlSet\Services\" + ServiceName;
     internal const string AuthorizedUserSidValue = "AuthorizedUserSid";
+    internal const string LocalAppDataValue = "OwnerLocalAppData";
     internal const string ApprovalScreensArgument = "--mwb-input-approval-screens";
     internal const string ApprovalScreensValue = "BlockApprovalScreens";
     private const uint DesktopJournalPlayback = 0x0020;
@@ -163,9 +164,11 @@ internal static class PrivilegedInput
             else if (args[1] is InstallArgument or RemoveArgument or UninstallArgument)
             {
                 bool remove = args[1] != InstallArgument;
-                if (args.Length != (remove ? 2 : 3) || !new WindowsPrincipal(identity).IsInRole(WindowsBuiltInRole.Administrator))
+                if ((remove ? args.Length != 2 : args.Length is not (3 or 4))
+                    || !new WindowsPrincipal(identity).IsInRole(WindowsBuiltInRole.Administrator))
                     throw new UnauthorizedAccessException("Administrator approval is required to manage protected input.");
-                PortableInstallLifecycle.ConfigurePrivilegedInput(remove, remove ? null : args[2], args[1] == UninstallArgument);
+                PortableInstallLifecycle.ConfigurePrivilegedInput(remove, remove ? null : args[2], args[1] == UninstallArgument,
+                    args.Length == 4 ? args[3] : null);
             }
             else
             {
@@ -539,16 +542,19 @@ internal static class PrivilegedInput
         private readonly object gate = new();
         private Process agent;
         private EventWaitHandle stopAgent;
+        private EventWaitHandle handoff;
         private Timer retry;
         private bool logonAgent;
         private bool stopping;
         internal InputService() { ServiceName = PrivilegedInput.ServiceName; CanHandleSessionChangeEvent = true; AutoLog = false; }
-        protected override void OnStart(string[] args) => retry = new Timer(_ =>
+        protected override void OnStart(string[] args) => retry = new Timer(_ => TryEnsureAgent(), null, 0, 2000);
+
+        private void TryEnsureAgent()
         {
             try { EnsureAgent(); }
             catch (Exception error) when (error is IOException or Win32Exception or UnauthorizedAccessException)
             { Logger.Log("Input session launch will retry: " + error.GetType().Name); }
-        }, null, 0, 2000);
+        }
         protected override void OnSessionChange(SessionChangeDescription changeDescription)
         {
             if (changeDescription.Reason == SessionChangeReason.SessionLogoff)
@@ -557,21 +563,35 @@ internal static class PrivilegedInput
                     if (agent != null && agent.SessionId == changeDescription.SessionId) StopAgent();
                 return; // The timer waits for the next input desktop/session to become ready.
             }
-            EnsureAgent();
+            TryEnsureAgent();
         }
         protected override void OnStop() { lock (gate) { stopping = true; retry?.Dispose(); StopAgent(); } }
         private void AgentExited(object sender, EventArgs args)
-        { lock (gate) { if (!stopping && ReferenceEquals(sender, agent)) Environment.Exit(1); } }
+        {
+            lock (gate)
+            {
+                if (stopping || !ReferenceEquals(sender, agent)) return;
+                if (!logonAgent) Environment.Exit(1);
+                Logger.Log("Sign-in input process exited: " + agent.ExitCode);
+                StopAgent();
+            }
+        }
         private void StopAgent()
         {
             if (agent != null)
             {
                 agent.Exited -= AgentExited;
                 stopAgent?.Set();
-                if (!agent.HasExited && !agent.WaitForExit(5000)) agent.Kill();
+                if (!agent.HasExited && !agent.WaitForExit(5000))
+                {
+                    try { agent.Kill(); }
+                    catch (InvalidOperationException) when (agent.HasExited) { }
+                    if (!agent.WaitForExit(5000)) throw new IOException("The previous input process is still running.");
+                }
                 agent.Dispose(); agent = null;
             }
             stopAgent?.Dispose(); stopAgent = null;
+            handoff?.Dispose(); handoff = null;
         }
         private void EnsureAgent()
         {
@@ -585,11 +605,16 @@ internal static class PrivilegedInput
                 // Original MWB launches a SYSTEM process on winlogon before a user token exists.
                 if (session != -1)
                     try { user = InteractiveUser(session); } catch (Win32Exception) { }
-                string role = LogonSession.SelectRole(authorized, user?.Value, session, ApprovalScreensAllowed());
+                bool approvalScreens = ApprovalScreensAllowed();
+                string role = LogonSession.SelectRole(authorized, user?.Value, session, approvalScreens);
                 if (role == null)
                 { StopAgent(); return; }
                 bool needsLogon = role == LogonSession.Argument;
-                if (agent != null && !agent.HasExited && agent.SessionId == session && logonAgent == needsLogon) return;
+                if (agent != null && !agent.HasExited && agent.SessionId == session)
+                {
+                    if (logonAgent == needsLogon) return;
+                    if (logonAgent && approvalScreens && handoff != null && !handoff.WaitOne(0)) return;
+                }
                 StopAgent();
                 string eventName = @"Global\MWBP.Input.Stop." + Guid.NewGuid().ToString("N");
                 var security = new EventWaitHandleSecurity();
@@ -599,6 +624,7 @@ internal static class PrivilegedInput
                 stopAgent = EventWaitHandleAcl.Create(false, EventResetMode.ManualReset, eventName, out bool created, security);
                 if (!created) throw new IOException("The input stop signal already exists.");
                 logonAgent = needsLogon;
+                if (needsLogon) handoff = LogonSession.CreateHandoff(session, new SecurityIdentifier(authorized));
                 agent = LaunchAgent(session, eventName, user ?? new SecurityIdentifier(authorized), needsLogon);
                 agent.Exited += AgentExited;
                 agent.EnableRaisingEvents = true;

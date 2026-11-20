@@ -604,10 +604,10 @@ internal partial class FrmMatrix
         {
             installationStartup = new CheckBox { Text = "Start with Windows", Name = "installationStartup" };
             AddOption(management, installationStartup, null, "Start this installed copy when you sign in to Windows.");
-            installationStartup.CheckedChanged += (_, _) =>
+            installationStartup.CheckStateChanged += (_, _) =>
             {
                 if (refreshingInstallation) return;
-                try { PortableApplication.SetStartWithWindows(installationStartup.Checked); }
+                try { LogonStartup.SetEnabled(installationStartup.CheckState == CheckState.Checked); }
                 catch (Exception error) { RefreshInstallationStartup(); SettingsError(error); }
             };
             RefreshInstallationStartup();
@@ -634,7 +634,15 @@ internal partial class FrmMatrix
     private void RefreshInstallationStartup()
     {
         refreshingInstallation = true;
-        try { installationStartup.Checked = PortableApplication.IsStartWithWindowsEnabled(); }
+        try
+        {
+            installationStartup.CheckState = LogonStartup.IsEnabled() switch
+            {
+                true => CheckState.Checked,
+                false => CheckState.Unchecked,
+                null => CheckState.Indeterminate,
+            };
+        }
         catch (Exception error) { SettingsError(error); }
         finally { refreshingInstallation = false; }
     }

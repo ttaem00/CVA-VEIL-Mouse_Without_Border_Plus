@@ -80,7 +80,13 @@ namespace MouseWithoutBorders.Class
             string[] startupArgs = Environment.GetCommandLineArgs();
             bool logonRole;
             try { logonRole = LogonSession.Prepare(startupArgs); }
-            catch (Exception error) { Console.Error.WriteLine(error.Message); Environment.ExitCode = 1; return; }
+            catch (Exception error)
+            {
+                ManagedCommon.Logger.InitializeLogger("\\MouseWithoutBorders\\Logs");
+                Logger.Log($"Sign-in input initialization failed: {error.GetType().Name}, HRESULT=0x{error.HResult:X8}.");
+                Environment.ExitCode = 1;
+                return;
+            }
             if (PortableInstallLifecycle.TryRunNetworkSetup(startupArgs)) return;
             if (PrivilegedInput.TryRun(startupArgs)) return;
             if (PortableApplication.TryRunSilentInstall(startupArgs)) return;

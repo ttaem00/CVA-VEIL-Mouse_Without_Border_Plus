@@ -33,8 +33,6 @@ internal static class PortableApplication
 
     internal const string AppModeInstalled = "Installed";
     internal const string AppModePortable = "Portable";
-    private const string StartupRegistryPath = @"Software\Microsoft\Windows\CurrentVersion\Run";
-    private const string StartupValueName = "MouseWithoutBordersPlus";
     internal const string ShortcutName = "VEIL MWBP.lnk";
     private const string LegacyShortcutName = "Mouse Without Borders Plus.lnk";
 
@@ -156,25 +154,24 @@ internal static class PortableApplication
         string sourceSettings = SelectInstallSource(CurrentSettingsPath, SettingsPathForExecutable(LegacyExecutable), targetSettings,
             preserveCurrentPreferences);
         bool moving = sourceSettings != null && !sourceSettings.Equals(targetSettings, StringComparison.OrdinalIgnoreCase);
-        bool startup = newInstallation && sourceSettings == null && !File.Exists(targetSettings) && !File.Exists(targetSettings + ".bak")
-            || IsStartWithWindowsEnabled(CurrentExecutablePath, PrivilegedInput.ProtectedExecutable, LegacyExecutable);
+        bool freshStartupDefault = newInstallation && sourceSettings == null && !File.Exists(targetSettings) && !File.Exists(targetSettings + ".bak");
         using var transaction = new PortableInstallTransaction();
         if (preserveCurrentPreferences) DurableTransfers.PrepareInstall();
         try
         {
             if (moving || !preserveCurrentPreferences)
                 PrepareInstallPreferences(moving ? sourceSettings : null, targetSettings, transaction);
+            LogonStartup.ApplyInstallation(transaction, freshStartupDefault, CurrentExecutablePath, PrivilegedInput.ProtectedExecutable, LegacyExecutable);
             using var identity = WindowsIdentity.GetCurrent();
             string authorizedUserSid = identity.User?.Value ?? throw new UnauthorizedAccessException("The current Windows account is unavailable.");
-            using var installer = Process.Start(PortableInstallLifecycle.CreatePrivilegedInputStartInfo(authorizedUserSid: authorizedUserSid))
+            using var installer = Process.Start(PortableInstallLifecycle.CreatePrivilegedInputStartInfo(authorizedUserSid: authorizedUserSid,
+                localAppData: Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData)))
                 ?? throw new IOException("Windows did not start protected input setup.");
             await installer.WaitForExitAsync();
             if (installer.ExitCode != 0) throw new IOException("Protected input setup did not complete (" + installer.ExitCode + ").");
-            TrackUserInstallEntries(transaction);
             InstallShortcuts(transaction, PrivilegedInput.ProtectedExecutable,
                 Environment.GetFolderPath(Environment.SpecialFolder.Programs),
                 Environment.GetFolderPath(Environment.SpecialFolder.DesktopDirectory), CurrentExecutablePath, LegacyExecutable);
-            SetStartWithWindows(startup, PrivilegedInput.ProtectedExecutable);
             RegisterInstalledApplication(transaction, Registry.CurrentUser);
             if (launchAfterExit)
                 ScheduleInstalledLaunchAfterExit(PrivilegedInput.ProtectedExecutable, PrivilegedInput.ProtectedDirectory,
@@ -203,34 +200,12 @@ internal static class PortableApplication
         if (setup.ExitCode != 0) throw new IOException("Approval screen control was not changed (" + setup.ExitCode + ").");
     }
 
-    internal static bool IsStartWithWindowsEnabled() => IsStartWithWindowsEnabled(CurrentExecutablePath);
-
-    private static bool IsStartWithWindowsEnabled(params string[] executables)
-    {
-        try
-        {
-            using var key = Registry.CurrentUser.OpenSubKey(StartupRegistryPath, writable: false);
-            var command = key?.GetValue(StartupValueName) as string;
-            return StartupCommandTargets(command, executables);
-        }
-        catch (Exception)
-        {
-            // A locked-down Windows account should still be able to run the app.
-            return false;
-        }
-    }
-
     internal static bool StartupCommandTargets(string command, params string[] executables)
     {
         if (string.IsNullOrWhiteSpace(command)) return false;
         foreach (string executable in executables)
             if (command.Trim().Trim('"').Equals(executable, StringComparison.OrdinalIgnoreCase)) return true;
         return false;
-    }
-
-    internal static void SetStartWithWindows(bool enabled)
-    {
-        SetStartWithWindows(enabled, CurrentExecutablePath);
     }
 
     internal static bool PromptToInstallCurrentPortableCopy(IWin32Window owner)
@@ -291,16 +266,19 @@ internal static class PortableApplication
         string executablePath = CurrentExecutablePath;
         using var identity = WindowsIdentity.GetCurrent();
         var scripts = CreateUninstallCleanupScripts(executablePath, Environment.ProcessId, deletePreferences, identity.User.Value);
-        using var cleanup = Process.Start(CreateCleanupStartInfo(scripts.Files, IsInstalledCopy))
+        using var startup = new PortableInstallTransaction();
+        bool installed = IsInstalledCopy;
+        LogonStartup.RemoveInstallation(startup, installed, installed ? [executablePath, LegacyExecutable] : [executablePath]);
+        using var cleanup = Process.Start(CreateCleanupStartInfo(scripts.Files, installed))
             ?? throw new IOException("Windows did not start uninstall cleanup.");
         // This helper now owns removal; later user-cleanup errors must not restart its old GUI.
         running?.Complete();
+        startup.Complete();
         if (scripts.Preferences != null)
         {
             using var userCleanup = Process.Start(CreateCleanupStartInfo(scripts.Preferences, false))
                 ?? throw new IOException("Windows did not start preference cleanup.");
         }
-        RemoveStartupEntryIfOwnedBy(executablePath);
         RemoveProductShortcuts(executablePath, Environment.GetFolderPath(Environment.SpecialFolder.Programs),
             Environment.GetFolderPath(Environment.SpecialFolder.DesktopDirectory));
     }
@@ -473,19 +451,6 @@ internal static class PortableApplication
         finally { if (File.Exists(staged)) File.Delete(staged); }
     }
 
-    private static void TrackUserInstallEntries(PortableInstallTransaction transaction)
-    {
-        using var startupKey = Registry.CurrentUser.OpenSubKey(StartupRegistryPath);
-        object previous = startupKey?.GetValue(StartupValueName, null, RegistryValueOptions.DoNotExpandEnvironmentNames);
-        var kind = previous == null ? RegistryValueKind.String : startupKey.GetValueKind(StartupValueName);
-        transaction.OnRollback(() =>
-        {
-            using var key = Registry.CurrentUser.CreateSubKey(StartupRegistryPath, writable: true);
-            if (previous == null) key.DeleteValue(StartupValueName, throwOnMissingValue: false);
-            else key.SetValue(StartupValueName, previous, kind);
-        });
-    }
-
     internal static void SaveInitialSettings(string settingsPath, string appMode)
     {
         var isNewSettingsFile = !File.Exists(settingsPath);
@@ -503,29 +468,6 @@ internal static class PortableApplication
         }
 
         SaveSettingsDocument(settingsPath, settings);
-    }
-
-    private static void SetStartWithWindows(bool enabled, string executablePath)
-    {
-        if (!enabled)
-        {
-            RemoveStartupEntryIfOwnedBy(executablePath);
-            return;
-        }
-
-        using var key = Registry.CurrentUser.CreateSubKey(StartupRegistryPath, writable: true)
-            ?? throw new InvalidOperationException("Windows did not provide access to the current-user startup settings.");
-        key.SetValue(StartupValueName, '"' + executablePath + '"', RegistryValueKind.String);
-    }
-
-    private static void RemoveStartupEntryIfOwnedBy(string executablePath)
-    {
-        using var key = Registry.CurrentUser.OpenSubKey(StartupRegistryPath, writable: true);
-        var command = key?.GetValue(StartupValueName) as string;
-        if (StartupCommandTargets(command, executablePath))
-        {
-            key.DeleteValue(StartupValueName, throwOnMissingValue: false);
-        }
     }
 
     internal static void InstallShortcuts(PortableInstallTransaction transaction, string executablePath,

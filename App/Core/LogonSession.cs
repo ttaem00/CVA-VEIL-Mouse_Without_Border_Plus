@@ -3,6 +3,7 @@ using System;
 using System.Diagnostics;
 using System.IO;
 using System.Linq;
+using System.Security.AccessControl;
 using System.Security.Principal;
 using System.Threading;
 using Microsoft.Win32;
@@ -18,14 +19,66 @@ internal static class LogonSession
     internal static bool Active { get; private set; }
     internal static string SettingsPath { get; private set; }
 
+    private static string HandoffName(int session, string sid) => $@"Global\MWBP.Input.Handoff.{session}.{sid}";
+
+    internal static EventWaitHandle CreateHandoff(int session, SecurityIdentifier user)
+    {
+        var system = new SecurityIdentifier(WellKnownSidType.LocalSystemSid, null);
+        var security = new EventWaitHandleSecurity();
+        security.SetAccessRuleProtection(true, false);
+        security.SetOwner(system);
+        security.AddAccessRule(new EventWaitHandleAccessRule(system, EventWaitHandleRights.FullControl, AccessControlType.Allow));
+        security.AddAccessRule(new EventWaitHandleAccessRule(user,
+            EventWaitHandleRights.Modify | EventWaitHandleRights.ReadPermissions, AccessControlType.Allow));
+        try
+        {
+            var ready = EventWaitHandleAcl.Create(false, EventResetMode.ManualReset, HandoffName(session, user.Value), out bool created, security);
+            if (created) return ready;
+            ready.Dispose();
+        }
+        catch (Exception error) when (error is UnauthorizedAccessException or WaitHandleCannotBeOpenedException or IOException)
+        {
+            Logger.Log("Sign-in handoff signal unavailable: " + error.GetType().Name);
+        }
+        return null;
+    }
+
+    internal static bool WaitForHandoff(int session)
+    {
+        using var user = WindowsIdentity.GetCurrent();
+        try
+        {
+            if (!EventWaitHandleAcl.TryOpenExisting(HandoffName(session, user.User.Value),
+                EventWaitHandleRights.Modify | EventWaitHandleRights.ReadPermissions, out var ready)) return false;
+            using (ready)
+            {
+                if (ready.GetAccessControl().GetOwner(typeof(SecurityIdentifier)) is not SecurityIdentifier owner
+                    || !owner.IsWellKnown(WellKnownSidType.LocalSystemSid)) return false;
+                // A Windows automatic sign-in can start this app while Winlogon still receives input.
+                if (WinAPI.IsMyDesktopActive()) ready.Set();
+                return true; // The service releases this event after the former port owner exits.
+            }
+        }
+        catch (Exception error) when (error is UnauthorizedAccessException or WaitHandleCannotBeOpenedException or IOException)
+        { return false; }
+    }
+
     internal static string ResolveSettingsPath(string sid)
     {
         sid = PrivilegedInput.NormalizeAuthorizedUserSid(sid);
+        using var service = Registry.LocalMachine.OpenSubKey(PrivilegedInput.ServiceRegistryPath + @"\Parameters");
+        if (string.Equals(service?.GetValue(PrivilegedInput.AuthorizedUserSidValue) as string, sid, StringComparison.OrdinalIgnoreCase)
+            && service.GetValue(PrivilegedInput.LocalAppDataValue) is string localAppData && IsLocalAppDataPath(localAppData))
+            return Path.Combine(localAppData, "MouseWithoutBordersPlus", PortableApplication.SettingsFileName);
         using var profile = Registry.LocalMachine.OpenSubKey(@"SOFTWARE\Microsoft\Windows NT\CurrentVersion\ProfileList\" + sid);
         string root = profile?.GetValue("ProfileImagePath") as string;
         if (string.IsNullOrWhiteSpace(root)) throw new IOException("The installed account profile is unavailable.");
         return Path.Combine(Environment.ExpandEnvironmentVariables(root), "AppData", "Local", "MouseWithoutBordersPlus", PortableApplication.SettingsFileName);
     }
+
+    internal static bool IsLocalAppDataPath(string path) => !string.IsNullOrWhiteSpace(path)
+        && Path.IsPathFullyQualified(path) && Path.GetPathRoot(path) is { Length: 3 } root
+        && root[1] == ':' && new DriveInfo(root).DriveType is DriveType.Fixed;
 
     internal static bool Prepare(string[] args)
     {
