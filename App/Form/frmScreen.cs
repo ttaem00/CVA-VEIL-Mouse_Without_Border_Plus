@@ -433,6 +433,8 @@ namespace MouseWithoutBorders
                 {
                     if (Common.Sk == null)
                     {
+                        if (!Common.RunOnLogonDesktop && PortableApplication.IsInstalledCopy
+                            && LogonSession.WaitForHandoff(Common.CurrentProcess.SessionId)) return;
                         if (!Common.SecondOpenSocketTry)
                         {
                             if (!Common.RunOnLogonDesktop && !Common.RunOnScrSaverDesktop && !Helper.GetUserName())

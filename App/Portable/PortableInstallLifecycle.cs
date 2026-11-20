@@ -63,12 +63,16 @@ internal static class PortableInstallLifecycle
         return true;
     }
 
-    internal static ProcessStartInfo CreatePrivilegedInputStartInfo(bool remove = false, string authorizedUserSid = null)
+    internal static ProcessStartInfo CreatePrivilegedInputStartInfo(bool remove = false, string authorizedUserSid = null, string localAppData = null)
     {
         var info = new ProcessStartInfo(Environment.ProcessPath!)
         { UseShellExecute = true, Verb = "runas", WindowStyle = ProcessWindowStyle.Hidden };
         info.ArgumentList.Add(remove ? PrivilegedInput.RemoveArgument : PrivilegedInput.InstallArgument);
-        if (!remove) info.ArgumentList.Add(authorizedUserSid);
+        if (!remove)
+        {
+            info.ArgumentList.Add(authorizedUserSid);
+            if (LogonSession.IsLocalAppDataPath(localAppData)) info.ArgumentList.Add(localAppData);
+        }
         return info;
     }
 
@@ -101,13 +105,14 @@ internal static class PortableInstallLifecycle
     }
 
     // Runs only in the early, explicitly elevated installer role; it never reads preferences.
-    internal static void ConfigurePrivilegedInput(bool remove, string authorizedUserSid = null, bool uninstall = false)
+    internal static void ConfigurePrivilegedInput(bool remove, string authorizedUserSid = null, bool uninstall = false, string localAppData = null)
     {
         bool installService = PrivilegedInput.ServiceModeAllowed;
         if (!remove && installService) authorizedUserSid = PrivilegedInput.NormalizeAuthorizedUserSid(authorizedUserSid);
         string image = "\"" + PrivilegedInput.ProtectedExecutable + "\" " + PrivilegedInput.ServiceArgument;
         using var key = Microsoft.Win32.Registry.LocalMachine.OpenSubKey(PrivilegedInput.ServiceRegistryPath);
         bool exists = key != null;
+        bool disabled = key?.GetValue("Start") is 4;
         if (exists && !string.Equals(key.GetValue("ImagePath") as string, image, StringComparison.OrdinalIgnoreCase))
             throw new IOException("The input service name belongs to another installation.");
         if (exists) StopInputService();
@@ -155,14 +160,23 @@ internal static class PortableInstallLifecycle
                     RunServiceCommand("create", PrivilegedInput.ServiceName, "binPath=", image, "start=", "auto", "DisplayName=", "Mouse Without Borders Plus Input");
                     created = true;
                 }
+                else if (!disabled && (key.GetValue("Start") is 3 || key.GetValue("DelayedAutostart") is 1))
+                {
+                    string previousStart = key.GetValue("Start") is 3 ? "demand" : "delayed-auto";
+                    transaction.OnRollback(() => RunServiceCommand("config", PrivilegedInput.ServiceName, "start=", previousStart));
+                    RunServiceCommand("config", PrivilegedInput.ServiceName, "start=", "auto");
+                }
                 using (var parameters = Microsoft.Win32.Registry.LocalMachine.CreateSubKey(PrivilegedInput.ServiceRegistryPath + @"\Parameters", true))
                 {
                     string previous = parameters.GetValue(PrivilegedInput.AuthorizedUserSidValue) as string;
+                    string previousAppData = parameters.GetValue(PrivilegedInput.LocalAppDataValue) as string;
                     transaction.OnRollback(() =>
                     {
                         using var restore = Microsoft.Win32.Registry.LocalMachine.CreateSubKey(PrivilegedInput.ServiceRegistryPath + @"\Parameters", true);
                         if (previous == null) restore.DeleteValue(PrivilegedInput.AuthorizedUserSidValue, false);
                         else restore.SetValue(PrivilegedInput.AuthorizedUserSidValue, previous, Microsoft.Win32.RegistryValueKind.String);
+                        if (previousAppData == null) restore.DeleteValue(PrivilegedInput.LocalAppDataValue, false);
+                        else restore.SetValue(PrivilegedInput.LocalAppDataValue, previousAppData, Microsoft.Win32.RegistryValueKind.String);
                     });
                     var registrySecurity = new RegistrySecurity();
                     registrySecurity.SetAccessRuleProtection(true, false); registrySecurity.SetOwner(admins);
@@ -170,12 +184,17 @@ internal static class PortableInstallLifecycle
                         registrySecurity.AddAccessRule(new RegistryAccessRule(sid, sid == users ? RegistryRights.ReadKey : RegistryRights.FullControl,
                             InheritanceFlags.ContainerInherit, PropagationFlags.None, AccessControlType.Allow));
                     parameters.SetAccessControl(registrySecurity);
-                    parameters.SetValue(PrivilegedInput.AuthorizedUserSidValue, authorizedUserSid, Microsoft.Win32.RegistryValueKind.String);                }
+                    parameters.SetValue(PrivilegedInput.AuthorizedUserSidValue, authorizedUserSid, Microsoft.Win32.RegistryValueKind.String);
+                    if (LogonSession.IsLocalAppDataPath(localAppData))
+                        parameters.SetValue(PrivilegedInput.LocalAppDataValue, localAppData, Microsoft.Win32.RegistryValueKind.String);
+                    else if (!string.Equals(previous, authorizedUserSid, StringComparison.OrdinalIgnoreCase))
+                        parameters.DeleteValue(PrivilegedInput.LocalAppDataValue, false);
+                }
                 // SCM owns recovery; the app does not add an input retry/polling loop.
                 RunServiceCommand("failure", PrivilegedInput.ServiceName, "reset=", "86400", "actions=", "restart/5000");
                 // The running service must release the protected image before file rollback.
                 transaction.OnRollback(StopInputService);
-                RunServiceCommand("start", PrivilegedInput.ServiceName);
+                if (!disabled) RunServiceCommand("start", PrivilegedInput.ServiceName);
             }
             ConfigureFirewall(remove: false);
             transaction.Complete();
@@ -184,7 +203,7 @@ internal static class PortableInstallLifecycle
         {
             // The file transaction has restored the previous executable before restart.
             if (created) RunServiceCommand("delete", PrivilegedInput.ServiceName);
-            else if (exists && installService) RunServiceCommand("start", PrivilegedInput.ServiceName);
+            else if (exists && installService && !disabled) RunServiceCommand("start", PrivilegedInput.ServiceName);
             throw;
         }
     }
