@@ -983,6 +983,8 @@ public sealed class Rc8SettingsTests
                 System.Globalization.CultureInfo.CurrentUICulture = System.Globalization.CultureInfo.GetCultureInfo(cultureName);
                 var document = new MouseWithoutBordersSettings();
                 document.Properties.DefaultReceivingFolder = @"C:\Users\Example\Desktop\MWBP";
+                document.Properties.EasyMouse.Value = (int)EasyMouseOption.Custom;
+                document.Properties.EasyMouseActivationKeys = [(int)Keys.CapsLock];
                 document.Properties.MachineID.Value = 103;
                 document.Properties.MachineMatrixString = ["LOCAL-PC", "SECOND-PC", "", ""];
                 Setting.Values = Settings(document); Common.MachineName = "LOCAL-PC"; Setting.Values.Username = "ui-preview";
@@ -1014,6 +1016,30 @@ public sealed class Rc8SettingsTests
                 foreach (TabPage page in tabs.TabPages)
                 {
                     tabs.SelectedTab = page; Application.DoEvents();
+                    string? recoveryHintName = page.Name switch
+                    {
+                        "tabPageMain" => "mainEmergencyInputHelp",
+                        "tabPageOther" => "emergencyInputHelp",
+                        _ => null,
+                    };
+                    if (recoveryHintName is not null)
+                    {
+                        var recoveryHint = Descendants(page).OfType<Label>().Single(c => c.Name == recoveryHintName);
+                        string expectedText = cultureName == "ko-KR" ? "긴급 마우스 복구 · Ctrl + Alt + Backspace"
+                            : "Emergency mouse recovery · Ctrl + Alt + Backspace";
+                        Assert.AreEqual(expectedText, recoveryHint.Text);
+                        Assert.IsTrue(recoveryHint.Visible && recoveryHint.Enabled && recoveryHint.Font.Bold && !recoveryHint.TabStop);
+                        Assert.IsFalse(string.IsNullOrWhiteSpace(recoveryHint.AccessibleDescription));
+                        var bounds = page.RectangleToClient(recoveryHint.RectangleToScreen(recoveryHint.ClientRectangle));
+                        Assert.IsTrue(page.ClientRectangle.Contains(bounds), $"Emergency recovery is outside the visible {page.Name} at {scalePercent}%.");
+                        Assert.IsTrue(recoveryHint.Height >= recoveryHint.GetPreferredSize(new Size(recoveryHint.Width, 0)).Height,
+                            $"Emergency recovery text is clipped on {page.Name} at {scalePercent}%.");
+                        foreach (Control sibling in recoveryHint.Parent!.Controls)
+                            if (sibling != recoveryHint && sibling.Visible)
+                                Assert.IsFalse(recoveryHint.Bounds.IntersectsWith(sibling.Bounds),
+                                    $"Emergency recovery overlaps {sibling.Name} on {page.Name} at {scalePercent}%.");
+                    }
+
                     foreach (Control child in Descendants(page).Where(c => c.Visible && c is Button))
                     {
                         Assert.IsTrue(child.Width >= child.GetPreferredSize(Size.Empty).Width || child is Button { AutoEllipsis: true },

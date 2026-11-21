@@ -54,6 +54,7 @@ public sealed class FullscreenRecoveryTests
                 document.Properties.EasyMouse.Value = (int)EasyMouseOption.Custom;
                 document.Properties.EasyMouseActivationKeys = [(int)Keys.CapsLock];
                 document.Properties.DrawMouseCursor = true;
+                document.Properties.KeyboardShortcutsEnabled = false;
                 string path = Path.Combine(folder, "prefs.json");
                 PortableSettingsStore.Write(path, JsonSerializer.Serialize(document, SettingsUtils.SerializerOptions));
                 Setting.Values = new MouseWithoutBorders.Class.Settings(new SettingsUtils(path), false);
@@ -70,8 +71,16 @@ public sealed class FullscreenRecoveryTests
                 typeof(MouseWithoutBorders.FrmMatrix).GetMethod("OnLoad", BindingFlags.Instance | BindingFlags.NonPublic)!.Invoke(owner, [EventArgs.Empty]);
                 typeof(MouseWithoutBorders.FrmMatrix).GetField("formShown", BindingFlags.Instance | BindingFlags.NonPublic)!.SetValue(owner, true);
                 var controls = Descendants(owner).ToArray();
-                Assert.AreEqual("자동 저장됩니다. 긴급 복귀: Ctrl+Alt+Backspace (단축키를 꺼도 사용 가능).",
-                    controls.Single(control => control.Name == "emergencyInputHelp").Text);
+                Assert.IsFalse(controls.OfType<CheckBox>().Single(control => control.Name == "checkBoxEnableKeyboardShortcuts").Checked);
+                Assert.IsFalse(controls.Single(control => control.Name == "shortcutNextComputer").Enabled);
+                foreach (string name in new[] { "mainEmergencyInputHelp", "emergencyInputHelp" })
+                {
+                    var instruction = controls.OfType<Label>().Single(control => control.Name == name);
+                    Assert.AreEqual("긴급 마우스 복구 · Ctrl + Alt + Backspace", instruction.Text);
+                    Assert.IsTrue(instruction.Enabled && instruction.Font.Bold && !instruction.TabStop);
+                    StringAssert.Contains(instruction.AccessibleDescription, "직접 연결");
+                    StringAssert.Contains(instruction.AccessibleDescription, "단축키");
+                }
                 var option = controls.OfType<CheckBox>().Single(control => control.Name == "blockFullscreenSwitching");
                 Assert.AreEqual("전체 화면 앱에서 화면 전환 차단", option.Text);
                 Assert.IsTrue(option.Checked);
