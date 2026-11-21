@@ -58,6 +58,19 @@ namespace MouseWithoutBorders.Class
         public static bool ShowServiceModeErrorTooltip;
 
         internal static LanDiscovery Discovery { get; private set; }
+        private static bool discoveryStartAttempted;
+
+        internal static bool PrepareNetwork()
+        {
+            if (discoveryStartAttempted) return true;
+            // The Winlogon process owns the UDP discovery address until input handoff.
+            if (!Common.RunOnLogonDesktop && PortableApplication.IsInstalledCopy
+                && LogonSession.WaitForHandoff(Common.CurrentProcess.SessionId)) return false;
+
+            discoveryStartAttempted = true;
+            Discovery = LanDiscovery.TryStart(Common.MachineName, () => Setting.Values.TcpPort);
+            return true;
+        }
         internal static PeerPairing Pairing { get; private set; }
 
         internal static int? ReadStartupPort(string[] args)
@@ -299,12 +312,15 @@ namespace MouseWithoutBorders.Class
 #endif
 
                 InitAndCleanup.Init();
-                using var discovery = Discovery = LanDiscovery.TryStart(Common.MachineName, () => Setting.Values.TcpPort);
                 Core.Helper.WndProcCounter++;
 
                 var formScreen = new FrmScreen();
-                using var pairing = Pairing = LogonSession.Active ? null : StartPairing(new WindowsFormsSynchronizationContext());
-                Application.Run(formScreen);
+                try
+                {
+                    using var pairing = Pairing = LogonSession.Active ? null : StartPairing(new WindowsFormsSynchronizationContext());
+                    Application.Run(formScreen);
+                }
+                finally { Discovery?.Dispose(); }
 
                 etwTrace?.Dispose();
             }

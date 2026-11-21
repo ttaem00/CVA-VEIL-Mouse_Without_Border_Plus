@@ -897,7 +897,7 @@ namespace MouseWithoutBorders.Class
             t.Start();
         }
 
-        internal void UpdateTCPClients()
+        internal void UpdateTCPClients(bool showConnectionWarnings)
         {
             if (InvalidKeyFound)
             {
@@ -928,7 +928,7 @@ namespace MouseWithoutBorders.Class
                                 continue;
                             }
 
-                            StartNewTcpClient(machineName);
+                            StartNewTcpClient(machineName, showConnectionWarnings);
                         }
                     }
                 }
@@ -984,7 +984,7 @@ namespace MouseWithoutBorders.Class
             }
         }
 
-        internal void StartNewTcpClient(string machineName)
+        internal void StartNewTcpClient(string machineName, bool showConnectionWarnings)
         {
             void ClientThread(object obj)
             {
@@ -1041,7 +1041,7 @@ namespace MouseWithoutBorders.Class
 
                         foreach (IPAddress vip in validatedAddresses)
                         {
-                            StartNewTcpClientThread(machineName, vip);
+                            StartNewTcpClientThread(machineName, vip, showConnectionWarnings);
                         }
 
                         validatedAddresses.Clear();
@@ -1058,7 +1058,8 @@ namespace MouseWithoutBorders.Class
 
                     UpdateTcpSockets(dummyTcp, SocketStatus.Timeout);
 
-                    Common.ShowToolTip(e.Message + ": " + machineName, 10000, ToolTipIcon.Warning, Setting.Values.ShowClipNetStatus);
+                    if (showConnectionWarnings)
+                        Common.ShowToolTip(e.Message + ": " + machineName, 10000, ToolTipIcon.Warning, Setting.Values.ShowClipNetStatus);
 
                     Logger.Log($"{nameof(StartNewTcpClient)}.{nameof(Dns.GetHostEntry)}: {e.Message}");
                 }
@@ -1144,14 +1145,14 @@ namespace MouseWithoutBorders.Class
 
                     foreach (IPAddress ip in validatedAddresses)
                     {
-                        StartNewTcpClientThread(machineName, ip);
+                        StartNewTcpClientThread(machineName, ip, showConnectionWarnings);
                     }
                 }
                 else
                 {
                     Logger.Log("Cannot resolve IPv4 Addresses of machine: " + machineName);
 
-                    if (!useName2IP)
+                    if (!useName2IP && showConnectionWarnings)
                     {
                         Common.ShowToolTip($"Cannot resolve IP Address of the remote machine: {machineName}.\r\nPlease fix your DNS or use the Mapping option in the Settings form.", 10000, ToolTipIcon.Warning, Setting.Values.ShowClipNetStatus);
                     }
@@ -1229,7 +1230,7 @@ namespace MouseWithoutBorders.Class
             }
         }
 
-        private void StartNewTcpClientThread(string machineName, IPAddress ip)
+        private void StartNewTcpClientThread(string machineName, IPAddress ip, bool showConnectionWarnings)
         {
             void NewTcpClient()
             {
@@ -1291,9 +1292,8 @@ namespace MouseWithoutBorders.Class
                             {
                                 Logger.Log($"tcpClient.Connect: Unable to connect after a timeout: {machineName}:{ip} : {e.Message}");
 
-                                string message = $"Connection timed out: {machineName}:{ip}";
-
-                                Common.ShowToolTip(message, 5000, ToolTipIcon.Warning, Setting.Values.ShowClipNetStatus);
+                                if (showConnectionWarnings)
+                                    Common.ShowToolTip($"Connection timed out: {machineName}:{ip}", 5000, ToolTipIcon.Warning, Setting.Values.ShowClipNetStatus);
 
                                 UpdateTcpSockets(tcp, SocketStatus.Timeout);
                                 return;
@@ -1318,7 +1318,8 @@ namespace MouseWithoutBorders.Class
                     // DHCP error, etc.
                     string localIP = tcpClient?.Client?.LocalEndPoint?.ToString();
 
-                    if (localIP != null && (localIP.StartsWith("169.254", StringComparison.InvariantCulture) || localIP.ToString().StartsWith("0.0", StringComparison.InvariantCulture)))
+                    if (showConnectionWarnings && localIP != null
+                        && (localIP.StartsWith("169.254", StringComparison.InvariantCulture) || localIP.StartsWith("0.0", StringComparison.InvariantCulture)))
                     {
                         Common.ShowToolTip($"Error: The machine has limited connectivity on [{localIP}].", 5000, ToolTipIcon.Warning, Setting.Values.ShowClipNetStatus);
                     }
