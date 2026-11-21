@@ -81,7 +81,7 @@ internal partial class FrmMatrix
         SetOptionTip(send, null, "Choose a connected PC and the files to send. Large files can be sent independently of the automatic clipboard limit.");
         SetOptionTip(buttonOK, null, "Save the monitor layout and PC name/IP mappings. The Options tab saves automatically.");
         optionHelp.SetHelpString(matrixSurface, matrixSurface.AccessibleDescription);
-        var actions = Actions(find, send, recovery);
+        var actions = Actions(find, send, recovery, EmergencyInputHelp("mainEmergencyInputHelp"));
         actions.Name = "primaryConnectionActions";
         actions.Dock = DockStyle.Top;
         actions.SizeChanged += (_, _) =>

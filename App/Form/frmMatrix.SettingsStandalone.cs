@@ -36,6 +36,19 @@ internal partial class FrmMatrix
         SetOptionTip(button, null, "Use this on the PC whose mouse cannot leave the screen. It restarts input hooks and connections on this PC. Sharing pauses briefly; pairing, screen layout, activation keys and cursor settings are kept. It does not turn off fullscreen blocking.");
         return button;
     }
+
+    private Label EmergencyInputHelp(string name)
+    {
+        var help = Explanation(Ui.Text("Emergency mouse recovery · Ctrl + Alt + Backspace"));
+        help.Name = name;
+        help.Font = new Font(Font, FontStyle.Bold);
+        help.BackColor = SystemColors.Info;
+        help.ForeColor = SystemColors.InfoText;
+        help.Padding = new Padding(7, 5, 7, 5);
+        SetOptionTip(help, null, "Press this on the PC your keyboard is directly connected to. It works even when MWBP shortcuts are off.");
+        return help;
+    }
+
     private CheckBox installationStartup;
     private bool refreshingInstallation;
     private bool refreshingTransferPreference;
@@ -304,10 +317,11 @@ internal partial class FrmMatrix
         try
         {
             var mouse = Section("Mouse and screen switching");
+            mouse.Add(EmergencyInputHelp("emergencyInputHelp"));
             AddOption(mouse, checkBoxMouseEdgeSwitching, "On");
             labelEasyMouse.Text = "Activation:"; labelEasyMouse.AutoSize = true;
             comboBoxEasyMouseOption.ResetFont();
-            SetOptionTip(comboBoxEasyMouseOption, "Always", "Switch at a screen edge immediately, or only while holding Ctrl or Shift.");
+            SetOptionTip(comboBoxEasyMouseOption, "Hold Caps Lock", "Switch at a screen edge immediately or while holding the selected keys.");
             toolTip.SetToolTip(labelEasyMouse, toolTip.GetToolTip(comboBoxEasyMouseOption));
             var editChord = SettingsButton(ChordButtonText(), (_, _) =>
             {
@@ -390,9 +404,6 @@ internal partial class FrmMatrix
             var shortcuts = new SettingsStack();
             AddOption(shortcuts, checkBoxEnableKeyboardShortcuts, "Off", "Assignments below are preserved while shortcuts are disabled.");
             checkBoxEnableKeyboardShortcuts.Font = new Font(Font, FontStyle.Bold);
-            var emergencyHelp = Explanation(Ui.Text("Saved automatically. Emergency local control: Ctrl+Alt+Backspace (always available)."));
-            emergencyHelp.Name = "emergencyInputHelp";
-            shortcuts.Add(emergencyHelp);
             var shortcutColumns = new SettingsStack(sideBySide: true);
             var shortcutGroups = new[] { new TableLayoutPanel(), new TableLayoutPanel() };
             foreach (var group in shortcutGroups)

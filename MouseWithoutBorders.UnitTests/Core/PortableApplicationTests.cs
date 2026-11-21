@@ -13,6 +13,7 @@ using System.Windows.Forms;
 using Microsoft.PowerToys.Settings.UI.Library;
 using Microsoft.Win32;
 using Microsoft.VisualStudio.TestTools.UnitTesting;
+using MouseWithoutBorders.Class;
 using MouseWithoutBorders.Core;
 using PowerToys.GPOWrapper;
 
@@ -259,16 +260,20 @@ public sealed class PortableApplicationTests
     }
 
     [TestMethod]
-    public void NewPreferencesShouldOpenMwbSetupOnFirstRun()
+    [DataRow(PortableApplication.AppModeInstalled)]
+    [DataRow(PortableApplication.AppModePortable)]
+    public void NewPreferencesShouldOpenMwbSetupOnFirstRun(string appMode)
     {
         WithTemporarySettingsPath(settingsPath =>
         {
-            PortableApplication.SaveInitialSettings(settingsPath, PortableApplication.AppModePortable);
+            PortableApplication.SaveInitialSettings(settingsPath, appMode);
 
             var settings = ReadSettings(settingsPath);
-            Assert.AreEqual(PortableApplication.AppModePortable, settings.AppMode);
+            Assert.AreEqual(appMode, settings.AppMode);
             Assert.IsTrue(settings.Properties.FirstRun);
             Assert.IsFalse(settings.Properties.WrapMouse, "New preferences should not wrap the pointer across the outside edges of the matrix by default.");
+            Assert.AreEqual((int)EasyMouseOption.Custom, settings.Properties.EasyMouse.Value);
+            CollectionAssert.AreEqual(new[] { (int)Keys.CapsLock }, settings.Properties.EasyMouseActivationKeys);
             Assert.IsFalse(settings.Properties.KeyboardShortcutsEnabled, "New preferences should disable all keyboard shortcuts by default.");
             Assert.AreEqual(0, settings.Properties.HotKeySwitchMachine.Value, "New preferences should disable direct machine-switch shortcuts by default.");
             Assert.IsTrue(settings.Properties.ToggleEasyMouseShortcut.IsEmpty());
@@ -306,13 +311,19 @@ public sealed class PortableApplicationTests
     }
 
     [TestMethod]
-    public void InstallingOverExistingPreferencesShouldPreserveThem()
+    [DataRow((int)EasyMouseOption.Enable)]
+    [DataRow((int)EasyMouseOption.Disable)]
+    [DataRow((int)EasyMouseOption.Ctrl)]
+    [DataRow((int)EasyMouseOption.Custom)]
+    public void InstallingOverExistingPreferencesShouldPreserveThem(int activationMode)
     {
         WithTemporarySettingsPath(settingsPath =>
         {
             var existing = new MouseWithoutBordersSettings();
             existing.Properties.SecurityKey.Value = "keep-this-key";
             existing.Properties.FirstRun = false;
+            existing.Properties.EasyMouse.Value = activationMode;
+            existing.Properties.EasyMouseActivationKeys = [(int)Keys.F8];
             existing.Properties.HotKeySwitchMachine.Value = 0x70;
             existing.Properties.KeyboardShortcutsEnabled = true;
             existing.Properties.LockMachineShortcut = new HotkeySettings(false, true, true, false, 'L');
@@ -324,6 +335,8 @@ public sealed class PortableApplicationTests
             Assert.AreEqual(PortableApplication.AppModeInstalled, settings.AppMode);
             Assert.AreEqual("keep-this-key", settings.Properties.SecurityKey.Value);
             Assert.IsFalse(settings.Properties.FirstRun);
+            Assert.AreEqual(activationMode, settings.Properties.EasyMouse.Value);
+            CollectionAssert.AreEqual(new[] { (int)Keys.F8 }, settings.Properties.EasyMouseActivationKeys);
             Assert.AreEqual(0x70, settings.Properties.HotKeySwitchMachine.Value);
             Assert.IsTrue(settings.Properties.KeyboardShortcutsEnabled);
             Assert.AreEqual('L', settings.Properties.LockMachineShortcut.Code);
@@ -592,7 +605,10 @@ public sealed class PortableApplicationTests
             Assert.AreEqual(legacy, PortableApplication.SelectInstallSource("missing-download.json", legacy, target, false));
             using (var transaction = new PortableInstallTransaction())
             { PortableApplication.PrepareInstallPreferences(legacy, target, transaction); transaction.Complete(); }
-            Assert.AreEqual("existing-game-group", ReadSettings(target).Properties.SecurityKey.Value);
+            var migrated = ReadSettings(target).Properties;
+            Assert.AreEqual("existing-game-group", migrated.SecurityKey.Value);
+            Assert.AreEqual((int)EasyMouseOption.Enable, migrated.EasyMouse.Value);
+            Assert.AreEqual(0, migrated.EasyMouseActivationKeys.Length);
             Assert.AreEqual("paused-transfer-history", File.ReadAllText(Path.Combine(Path.GetDirectoryName(target)!, "MouseWithoutBorders.transfers.json")));
             Assert.IsTrue(File.Exists(legacy), "Adopting the recognized old installation must not delete its original settings.");
         });

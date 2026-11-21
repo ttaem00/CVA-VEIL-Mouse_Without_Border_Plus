@@ -465,6 +465,8 @@ internal static class PortableApplication
             // The portable launcher creates the file before the imported MWB settings
             // loader runs. Mark it as new so MWB still opens its machine/key setup UI.
             settings.Properties.FirstRun = true;
+            settings.Properties.EasyMouse.Value = (int)EasyMouseOption.Custom;
+            settings.Properties.EasyMouseActivationKeys = [(int)Keys.CapsLock];
         }
 
         SaveSettingsDocument(settingsPath, settings);
