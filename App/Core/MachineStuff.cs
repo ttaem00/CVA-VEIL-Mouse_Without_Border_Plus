@@ -761,10 +761,10 @@ internal static class MachineStuff
         return name;
     }
 
-    internal static void UpdateClientSockets(string logHeader)
+    internal static void UpdateClientSockets(string logHeader, bool showConnectionWarnings = true)
     {
         Logger.LogDebug("UpdateClientSockets: " + logHeader);
-        Common.Sk?.UpdateTCPClients();
+        Common.Sk?.UpdateTCPClients(showConnectionWarnings);
     }
 
     private static SettingsForm settings;

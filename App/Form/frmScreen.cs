@@ -431,10 +431,9 @@ namespace MouseWithoutBorders
                 }
                 else
                 {
+                    if (!Program.PrepareNetwork()) return;
                     if (Common.Sk == null)
                     {
-                        if (!Common.RunOnLogonDesktop && PortableApplication.IsInstalledCopy
-                            && LogonSession.WaitForHandoff(Common.CurrentProcess.SessionId)) return;
                         if (!Common.SecondOpenSocketTry)
                         {
                             if (!Common.RunOnLogonDesktop && !Common.RunOnScrSaverDesktop && !Helper.GetUserName())
@@ -607,13 +606,14 @@ namespace MouseWithoutBorders
 #endif
                 }
 
-                if (count == 20)
+                if (count == 20 || (!Common.RunOnLogonDesktop && Common.Sk != null && count % 300 == 20))
                 {
 #if SHOW_ON_WINLOGON
                     // if (Common.RunOnLogonDesktop) ShowMouseWithoutBordersUiOnWinLogonDesktop(false);
 #endif
 
-                    MachineStuff.UpdateClientSockets("helperTimer_Tick"); // Sockets may be closed by the remote host when both machines switch desktop at the same time.
+                    // A peer can appear after the initial scan while other peers remain connected.
+                    MachineStuff.UpdateClientSockets("helperTimer_Tick", showConnectionWarnings: count == 20);
                 }
 
                 count++;
