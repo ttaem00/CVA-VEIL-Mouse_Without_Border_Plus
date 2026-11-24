@@ -28,17 +28,10 @@ internal static class ForegroundInputAccess
     [ThreadStatic] private static Classification foregroundCache;
     [ThreadStatic] private static Classification pointerCache;
 
-    internal static bool NullForegroundRequiresBroker(bool inputDesktopAccessible) => !inputDesktopAccessible;
-
     internal static bool RequiresBroker()
     {
         IntPtr foreground = NativeMethods.GetForegroundWindow();
-        if (foreground == IntPtr.Zero)
-        {
-            System.Drawing.Point point = default;
-            return NullForegroundRequiresBroker(NativeMethods.GetCursorPos(ref point));
-        }
-        if (NativeMethods.GetWindowThreadProcessId(foreground, out uint processId) == 0)
+        if (foreground == IntPtr.Zero || NativeMethods.GetWindowThreadProcessId(foreground, out uint processId) == 0)
             return true; // Includes a desktop transition; the worker attaches to the input desktop.
         return Classify(foregroundCache ??= new Classification(), processId, "foreground");
     }

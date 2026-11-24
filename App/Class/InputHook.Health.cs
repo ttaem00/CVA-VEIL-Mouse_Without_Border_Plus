@@ -10,7 +10,6 @@ internal partial class InputHook
     private long mouseHookSeenAt, keyboardHookSeenAt;
     private long pendingMouseSince, pendingKeyboardSince, latestMouseRaw, latestKeyboardRaw;
     private long lastHealthRepair;
-    private long? lastCaptureUpgradeAttempt;
     private const int DeliveryGraceMilliseconds = 250;
 
     [StructLayout(LayoutKind.Sequential)]
@@ -60,23 +59,6 @@ internal partial class InputHook
 
     internal bool HasMissedPhysicalInput(long now) => MissedDeviceKinds(now) != 0;
 
-    internal bool TryUpgradePrivilegedCapture()
-    {
-        if (privilegedCaptureActive || !PrivilegedInput.IsProtectedCopy || InputHook.RecordingKeys
-            || Common.RunOnLogonDesktop || Common.RunOnScrSaverDesktop || Common.DesMachineID != Common.MachineID) return false;
-        long now = Environment.TickCount64;
-        if (lastCaptureUpgradeAttempt.HasValue && now - lastCaptureUpgradeAttempt.Value < 5000) return false;
-        if (Common.CurrentProcess.SessionId != NativeMethods.WTSGetActiveConsoleSessionId() || !WinAPI.IsMyDesktopActive()) return false;
-        lastCaptureUpgradeAttempt = now;
-        if (!TryStartPrivilegedCapture()) return false;
-        UnhookLocalHooks();
-        SeedHeldPhysicalKeys();
-        Common.InitLastInputEventCount();
-        pendingMouseSince = pendingKeyboardSince = 0;
-        Logger.Log("Upgraded to privileged SYSTEM input capture.");
-        return true;
-    }
-
     internal bool RecoverMissedInput(bool force = false)
     {
         long now = Environment.TickCount64;
@@ -92,7 +74,7 @@ internal partial class InputHook
         pendingMouseSince = pendingKeyboardSince = 0;
         // A lost UP must not permanently consume the next ordinary Backspace.
         emergencyBackspaceDown = (emergencyBackspaceDown || force) && (NativeMethods.GetAsyncKeyState((IntPtr)VK.BACK) & 0x8000) != 0;
-        bool restored = IsCaptureInstalled;
+        bool restored = hMouseHook != 0 && hKeyboardHook != 0;
         Logger.Log($"Input capture recovery {(restored ? "completed" : "failed")}: {(force ? "emergency request" : "keyboard and mouse capture missed activity")}; returned to local control.");
         return restored;
     }
