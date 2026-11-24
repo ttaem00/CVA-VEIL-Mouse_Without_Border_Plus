@@ -33,6 +33,8 @@ namespace MouseWithoutBorders
 
         private void FrmInputCallback_Load(object sender, EventArgs e)
         {
+            Common.InputCallbackForm = this;
+            _ = Handle;
             InstallKeyboardAndMouseHook();
             if (!InputHook.ObserveDevices(Handle)) Logger.Log("Raw input health observation could not be registered.");
             if (!RegisterRecoveryHotkey()) Logger.Log("Windows emergency input hotkey is unavailable; another application may own it.");
@@ -61,6 +63,7 @@ namespace MouseWithoutBorders
         private int healthCheckPending;
         private int forceRecovery;
         internal const int RecoveryHotkeyId = 0x4d57;
+        internal const int CaptureDispatchMessage = 0x0457;
         [DllImport("user32.dll", SetLastError = true)] private static extern bool RegisterHotKey(IntPtr window, int id, uint modifiers, uint key);
         [DllImport("user32.dll")] private static extern bool UnregisterHotKey(IntPtr window, int id);
         internal bool RegisterRecoveryHotkey() => RegisterHotKey(Handle, RecoveryHotkeyId, 0x4003, 8);
@@ -76,12 +79,30 @@ namespace MouseWithoutBorders
                     try
                     {
                         bool requested = Interlocked.Exchange(ref forceRecovery, 0) != 0;
-                        if (ReferenceEquals(Common.InputCallbackForm, this)) Common.Hook?.RecoverMissedInput(requested);
+                        if (ReferenceEquals(Common.InputCallbackForm, this) && Common.Hook != null)
+                        {
+                            if (!requested) _ = Common.Hook.TryUpgradePrivilegedCapture();
+                            _ = Common.Hook.RecoverMissedInput(requested);
+                        }
                     }
                     finally { Interlocked.Exchange(ref healthCheckPending, 0); }
                 });
             }
             catch (InvalidOperationException) { Interlocked.Exchange(ref healthCheckPending, 0); }
+        }
+
+        internal void NotifyPrivilegedCaptureLost()
+        {
+            if (IsDisposed || !IsHandleCreated) return;
+            try
+            {
+                BeginInvoke(() =>
+                {
+                    if (ReferenceEquals(Common.InputCallbackForm, this))
+                        Common.Hook?.FallbackFromPrivilegedCapture();
+                });
+            }
+            catch (InvalidOperationException) { }
         }
 
         internal void NotifyInputPeerFailure(SocketStuff owner, uint peer)
@@ -103,6 +124,11 @@ namespace MouseWithoutBorders
 
         protected override void WndProc(ref Message message)
         {
+            if (message.Msg == CaptureDispatchMessage && ReferenceEquals(Common.InputCallbackForm, this))
+            {
+                Common.Hook?.DrainPendingCaptureFrames();
+                return;
+            }
             if (message.Msg == 0x00ff && ReferenceEquals(Common.InputCallbackForm, this))
                 Common.Hook?.ObserveRawInput(message.LParam);
             if (message.Msg == 0x0312 && message.WParam.ToInt32() == RecoveryHotkeyId)

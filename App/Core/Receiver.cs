@@ -8,6 +8,7 @@ using System.Diagnostics.CodeAnalysis;
 using System.Drawing;
 using System.Globalization;
 using System.IO;
+using System.Runtime.InteropServices;
 using System.Threading.Tasks;
 using System.Windows.Forms;
 
@@ -83,6 +84,35 @@ internal static class Receiver
     }
 
     private static System.Drawing.Point lastXY;
+    private static long lastRelativeSyncSentAt;
+    private static Point lastRelativeSyncPoint = new(int.MinValue, int.MinValue);
+    private static uint lastRelativeSyncTarget;
+
+    internal static bool CanSyncVisibleRelativePointer(bool cursorVisible, Rectangle clipBounds, Rectangle monitorBounds) =>
+        cursorVisible && monitorBounds.Width > 0 && monitorBounds.Height > 0 && clipBounds.Contains(monitorBounds);
+
+    private static void TrySendVisibleRelativePointerSync(ID target, Point point)
+    {
+        NativeMethods.CURSORINFO cursorInfo = new() { cbSize = Marshal.SizeOf<NativeMethods.CURSORINFO>() };
+        if (!NativeMethods.GetCursorInfo(ref cursorInfo) || (cursorInfo.flags & 1) == 0) return;
+        if (!NativeMethods.GetClipCursor(out var clipRect)) return;
+        var monitorBounds = Screen.FromPoint(point).Bounds;
+        var clipBounds = Rectangle.FromLTRB(clipRect.Left, clipRect.Top, clipRect.Right, clipRect.Bottom);
+        if (!CanSyncVisibleRelativePointer(true, clipBounds, monitorBounds)) return;
+        bool nearEdge = point.X - monitorBounds.Left <= 64 || monitorBounds.Right - 1 - point.X <= 64
+            || point.Y - monitorBounds.Top <= 64 || monitorBounds.Bottom - 1 - point.Y <= 64;
+        long now = Environment.TickCount64;
+        if (point == lastRelativeSyncPoint && (uint)target == lastRelativeSyncTarget) return;
+        if (!nearEdge && now - lastRelativeSyncSentAt < 50) return;
+        lastRelativeSyncSentAt = now;
+        lastRelativeSyncPoint = point;
+        lastRelativeSyncTarget = (uint)target;
+        var sync = new DATA { Type = PackageType.PointerCapture, Src = Common.MachineID, Des = target };
+        sync.Md.X = point.X;
+        sync.Md.Y = point.Y;
+        sync.Md.WheelDelta = Event.RelativeCursorSyncTag;
+        Common.Sk?.EnqueueInput(sync, null);
+    }
 
     private static bool IsAbsoluteMove(DATA package) => package.Type == PackageType.Mouse
         && package.Md.dwFlags == WM.WM_MOUSEMOVE && (uint)package.Md.X <= 65535 && (uint)package.Md.Y <= 65535;
@@ -203,6 +233,9 @@ internal static class Receiver
                         CustomCursor.ShowFakeMouseCursor(int.MinValue, int.MinValue);
                     else
                         CustomCursor.ShowFakeMouseCursor(lastXY.X, lastXY.Y);
+                    if (relative && package.Md.dwFlags == WM.WM_MOUSEMOVE && cursorPositionKnown
+                        && package.Src != ID.NONE && package.Src != Common.MachineID)
+                        TrySendVisibleRelativePointerSync(package.Src, lastXY);
                 }
 
                 DragDrop.DragDropStep01(package.Md.dwFlags);
@@ -409,11 +442,15 @@ internal static class Receiver
                 break;
 
             case PackageType.PointerCapture:
-                // RC19/20 may still send this notification. Movement is selected on the sender.
+                if (package.Des == Common.MachineID && package.Md.WheelDelta == Event.RelativeCursorSyncTag && package.Src != ID.NONE)
+                    Event.RecordRemotePointerSync((uint)package.Src, new Point(package.Md.X, package.Md.Y), Environment.TickCount64);
                 break;
 
             case PackageType.HideMouse:
                 Clipboard.HasSwitchedMachineSinceLastCopy = true;
+                lastRelativeSyncSentAt = 0;
+                lastRelativeSyncPoint = new Point(int.MinValue, int.MinValue);
+                lastRelativeSyncTarget = 0;
                 CustomCursor.ShowFakeMouseCursor(int.MinValue, int.MinValue);
                 InitAndCleanup.ReleaseAllKeys();
                 break;
