@@ -56,9 +56,44 @@ internal static class Event
 
     internal static int myLastX;
     internal static int myLastY;
+    internal const int RelativeCursorSyncTag = 0x5253594E;
+    private sealed record RemotePointerSync(uint Peer, Point Point, long Tick);
+    private static RemotePointerSync pendingRemotePointerSync;
     private static MonitorKey? activeMonitor;
     private static Point monitorPoint;
     private static bool activationPending;
+
+    internal static void RecordRemotePointerSync(uint peer, Point nativePoint, long tick) =>
+        Volatile.Write(ref pendingRemotePointerSync, new RemotePointerSync(peer, nativePoint, tick));
+
+    internal static bool TryApplyRemotePointerSync(MonitorLayout layout, uint peer, ref MonitorPlacement current, ref MonitorKey? currentKey, ref Point currentPoint, long now)
+    {
+        var sync = Interlocked.Exchange(ref pendingRemotePointerSync, null);
+        if (sync == null || sync.Peer != peer || peer == (uint)Common.MachineID || now - sync.Tick > 1000) return false;
+        MonitorPlacement matched = default;
+        bool found = false;
+        foreach (var monitor in layout.Monitors)
+        {
+            if (monitor.Key.Peer != peer) continue;
+            if (monitor.NativeBounds.Contains(sync.Point)) { matched = monitor; found = true; break; }
+        }
+        if (!found)
+        {
+            foreach (var monitor in layout.Monitors)
+            {
+                if (monitor.Key.Peer != peer) continue;
+                var inflated = Rectangle.Inflate(monitor.NativeBounds, 2, 2);
+                if (inflated.Contains(sync.Point)) { matched = monitor; found = true; break; }
+            }
+        }
+        if (!found) return false;
+        current = matched;
+        currentKey = matched.Key;
+        currentPoint = new Point(
+            Math.Clamp(sync.Point.X, matched.NativeBounds.Left, matched.NativeBounds.Right - 1),
+            Math.Clamp(sync.Point.Y, matched.NativeBounds.Top, matched.NativeBounds.Bottom - 1));
+        return true;
+    }
 
     internal static void SetMouseSwitchActivation(bool active) =>
         activationPending = active && Common.DesMachineID == Common.MachineID;
@@ -88,6 +123,7 @@ internal static class Event
     // The controller owns the target position; Windows adjacency never chooses a peer.
     internal static void ResetMonitorPointer(Point nativePoint)
     {
+        pendingRemotePointerSync = null;
         activeMonitor = null;
         monitorPoint = nativePoint;
         foreach (var monitor in MonitorTopology.Monitors)
@@ -101,6 +137,7 @@ internal static class Event
         MachineStuff.NewDesMachineID = Common.DesMachineID = Common.MachineID;
         MachineStuff.SwitchLocation.Count = 0;
         activationPending = false;
+        pendingRemotePointerSync = null;
         Common.LastPos = nativePoint;
         ResetMonitorPointer(nativePoint);
     }
@@ -170,6 +207,8 @@ internal static class Event
             }
             activeMonitor = current.Key;
         }
+        if (relative && peer != (uint)Common.MachineID && e.dwFlags == WM.WM_MOUSEMOVE)
+            _ = TryApplyRemotePointerSync(layout, peer, ref current, ref activeMonitor, ref monitorPoint, Environment.TickCount64);
 
         var proposed = peer == (uint)Common.MachineID ? new Point(e.X, e.Y)
             : new Point(monitorPoint.X + dx, monitorPoint.Y + dy);
@@ -309,6 +348,7 @@ internal static class Event
 
                 ID previousMachine = MachineStuff.desMachineID;
                 Common.DesMachineID = newDesMachineID;
+                pendingRemotePointerSync = null;
                 // The previous peer must not hold up input to the new peer.
                 if (newDesMachineID != ID.ALL && previousMachine != Common.MachineID)
                     Common.SendPackage(previousMachine, PackageType.HideMouse);

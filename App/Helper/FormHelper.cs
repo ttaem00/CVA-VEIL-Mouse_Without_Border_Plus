@@ -444,9 +444,21 @@ namespace MouseWithoutBorders
                     Application.DoEvents();
 
                     // Simulate input to help bring to the foreground, as it doesn't seem to work in every case otherwise.
-                    NativeMethods.INPUT input = new NativeMethods.INPUT { type = (int)NativeMethods.InputType.INPUT_MOUSE, mi = { } };
-                    NativeMethods.INPUT[] inputs = new NativeMethods.INPUT[] { input };
-                    _ = NativeMethods.SendInput(1, inputs, Marshal.SizeOf(typeof(NativeMethods.INPUT)));
+                    if (IntPtr.Size == 8)
+                    {
+                        NativeMethods.INPUT64[] inputs = [CreateForegroundAssistInput64()];
+                        _ = NativeMethods.SendInput64(1, inputs, Marshal.SizeOf<NativeMethods.INPUT64>());
+                    }
+                    else
+                    {
+                        NativeMethods.INPUT input = new NativeMethods.INPUT
+                        {
+                            type = (int)NativeMethods.InputType.INPUT_MOUSE,
+                            mi = new NativeMethods.MOUSEINPUT { dwExtraInfo = ForegroundAssistTag },
+                        };
+                        NativeMethods.INPUT[] inputs = new NativeMethods.INPUT[] { input };
+                        _ = NativeMethods.SendInput(1, inputs, Marshal.SizeOf(typeof(NativeMethods.INPUT)));
+                    }
                     m.Result = SetForeGround() ? new IntPtr(1) : IntPtr.Zero;
                     break;
 
@@ -467,6 +479,19 @@ namespace MouseWithoutBorders
                     break;
             }
         }
+
+        private static IntPtr ForegroundAssistTag =>
+#if PORTABLE_SINGLE_FILE
+            MouseWithoutBorders.Class.InputSimulation.InjectedInputTag;
+#else
+            new IntPtr(0x4D574250);
+#endif
+
+        internal static NativeMethods.INPUT64 CreateForegroundAssistInput64() => new()
+        {
+            type = (int)NativeMethods.InputType.INPUT_MOUSE,
+            mi = new NativeMethods.MOUSEINPUT { dwExtraInfo = ForegroundAssistTag },
+        };
 
         private bool SetForeGround()
         {

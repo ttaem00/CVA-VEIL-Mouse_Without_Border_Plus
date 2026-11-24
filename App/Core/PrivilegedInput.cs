@@ -97,9 +97,33 @@ internal static class PrivilegedInput
     private static string Executable => Environment.ProcessPath ?? throw new IOException("The application executable is unavailable.");
     // Reply v2 adds failure metadata; never interpret a v1 worker's held-input reply as v2.
     private static string PipeName(int session) => "MouseWithoutBordersPlus/Input/v2/" + session;
+    internal static string CapturePipeName(int session) => "MouseWithoutBordersPlus/Capture/v1/" + session;
+    internal const int CaptureFrameSize = 32;
     internal const int ReplySize = 12;
     internal enum InjectionStage : uint { None, OpenDesktop, AttachDesktop, SendInput, RestoreDesktop, ApprovalScreenBlocked }
     internal readonly record struct InjectionFailure(InjectionStage Stage, int Error);
+    internal readonly record struct CaptureFrame(byte Kind, int WParam, int First, int Second, int Third, int Fourth, long ExtraInfo);
+
+    [StructLayout(LayoutKind.Sequential)]
+    private struct CaptureMouseHookStruct
+    {
+        internal int PtX;
+        internal int PtY;
+        internal int MouseData;
+        internal int Flags;
+        internal int Time;
+        internal IntPtr DwExtraInfo;
+    }
+
+    [StructLayout(LayoutKind.Sequential)]
+    private struct CaptureKeyboardHookStruct
+    {
+        internal int VkCode;
+        internal int ScanCode;
+        internal int Flags;
+        internal int Time;
+        internal IntPtr DwExtraInfo;
+    }
     internal static bool IsProtectedCopy => Path.GetFullPath(Executable).Equals(ProtectedExecutable, StringComparison.OrdinalIgnoreCase);
     private static NamedPipeClientStream inputPipe;
     private static SafeProcessHandle inputAgent;
@@ -344,7 +368,7 @@ internal static class PrivilegedInput
         finally { if (token != IntPtr.Zero) NativeMethods.CloseHandle(token); }
     }
 
-    private static NamedPipeServerStream CreateAgentPipe(SecurityIdentifier user, int session)
+    private static NamedPipeServerStream CreateUserSessionPipe(string pipeName, SecurityIdentifier user)
     {
         var system = new SecurityIdentifier(WellKnownSidType.LocalSystemSid, null);
         var security = new PipeSecurity();
@@ -353,8 +377,245 @@ internal static class PrivilegedInput
         security.AddAccessRule(new PipeAccessRule(system, PipeAccessRights.FullControl, AccessControlType.Allow));
         security.AddAccessRule(new PipeAccessRule(user, PipeAccessRights.ReadWrite, AccessControlType.Allow));
         security.AddAccessRule(new PipeAccessRule(new SecurityIdentifier(WellKnownSidType.NetworkSid, null), PipeAccessRights.ReadWrite, AccessControlType.Deny));
-        return NamedPipeServerStreamAcl.Create(PipeName(session), PipeDirection.InOut, 1, PipeTransmissionMode.Byte,
+        return NamedPipeServerStreamAcl.Create(pipeName, PipeDirection.InOut, 1, PipeTransmissionMode.Byte,
             PipeOptions.Asynchronous, 0, 0, security);
+    }
+
+    private static NamedPipeServerStream CreateAgentPipe(SecurityIdentifier user, int session) =>
+        CreateUserSessionPipe(PipeName(session), user);
+
+    private static NamedPipeServerStream CreateCapturePipe(SecurityIdentifier user, int session) =>
+        CreateUserSessionPipe(CapturePipeName(session), user);
+
+    internal static void WriteCaptureFrame(Span<byte> buffer, CaptureFrame frame)
+    {
+        buffer[0] = frame.Kind;
+        buffer[1] = 0;
+        buffer[2] = 0;
+        buffer[3] = 0;
+        BinaryPrimitives.WriteInt32LittleEndian(buffer.Slice(4, 4), frame.WParam);
+        BinaryPrimitives.WriteInt32LittleEndian(buffer.Slice(8, 4), frame.First);
+        BinaryPrimitives.WriteInt32LittleEndian(buffer.Slice(12, 4), frame.Second);
+        BinaryPrimitives.WriteInt32LittleEndian(buffer.Slice(16, 4), frame.Third);
+        BinaryPrimitives.WriteInt32LittleEndian(buffer.Slice(20, 4), frame.Fourth);
+        BinaryPrimitives.WriteInt64LittleEndian(buffer.Slice(24, 8), frame.ExtraInfo);
+    }
+
+    internal static CaptureFrame ReadCaptureFrame(ReadOnlySpan<byte> buffer) => new(
+        buffer[0],
+        BinaryPrimitives.ReadInt32LittleEndian(buffer.Slice(4, 4)),
+        BinaryPrimitives.ReadInt32LittleEndian(buffer.Slice(8, 4)),
+        BinaryPrimitives.ReadInt32LittleEndian(buffer.Slice(12, 4)),
+        BinaryPrimitives.ReadInt32LittleEndian(buffer.Slice(16, 4)),
+        BinaryPrimitives.ReadInt32LittleEndian(buffer.Slice(20, 4)),
+        BinaryPrimitives.ReadInt64LittleEndian(buffer.Slice(24, 8)));
+
+    internal static bool TryExchangeCaptureFrame(Stream pipe, CaptureFrame frame, int timeoutMilliseconds, out bool suppress) =>
+        TryExchangeCaptureFrame(pipe, frame, timeoutMilliseconds, new byte[CaptureFrameSize], new byte[1], out suppress);
+
+    internal static bool TryExchangeCaptureFrame(Stream pipe, CaptureFrame frame, int timeoutMilliseconds, byte[] frameBuffer, byte[] replyBuffer, out bool suppress)
+    {
+        suppress = false;
+        try
+        {
+            WriteCaptureFrame(frameBuffer, frame);
+            using var deadline = new CancellationTokenSource(timeoutMilliseconds);
+            pipe.WriteAsync(frameBuffer, 0, CaptureFrameSize, deadline.Token).GetAwaiter().GetResult();
+            pipe.ReadExactlyAsync(replyBuffer.AsMemory(0, 1), deadline.Token).AsTask().GetAwaiter().GetResult();
+            suppress = replyBuffer[0] != 0;
+            return true;
+        }
+        catch (Exception error) when (error is IOException or ObjectDisposedException or OperationCanceledException or EndOfStreamException)
+        {
+            return false;
+        }
+    }
+
+    internal static NamedPipeClientStream TryConnectCapture(int timeoutMilliseconds = 10)
+    {
+        if (!IsProtectedCopy || Setting.Values.AllowServiceModeIsGpoConfigured) return null;
+        int session = Process.GetCurrentProcess().SessionId;
+        NamedPipeClientStream pipe = null;
+        try
+        {
+            pipe = new NamedPipeClientStream(".", CapturePipeName(session), PipeDirection.InOut, PipeOptions.Asynchronous);
+            pipe.Connect(timeoutMilliseconds);
+            var owner = pipe.GetAccessControl().GetOwner(typeof(SecurityIdentifier));
+            if (!Equals(owner, new SecurityIdentifier(WellKnownSidType.LocalSystemSid, null)))
+                throw new UnauthorizedAccessException("The capture endpoint is not owned by SYSTEM.");
+            if (!GetNamedPipeServerProcessId(pipe.SafePipeHandle, out uint server)) throw new Win32Exception();
+            using var verified = VerifyExecutable((int)server, session);
+            var connected = pipe;
+            pipe = null;
+            return connected;
+        }
+        catch (Exception error) when (error is IOException or System.TimeoutException or UnauthorizedAccessException or Win32Exception or OperationCanceledException)
+        {
+            return null;
+        }
+        finally
+        {
+            pipe?.Dispose();
+        }
+    }
+
+    private static bool IsDefaultInputDesktop()
+    {
+        IntPtr desktop = NativeMethods.OpenInputDesktop(0, false, NativeMethods.DESKTOP_READOBJECTS);
+        if (desktop == IntPtr.Zero) return false;
+        try { return !IsBlockedDesktop(desktop); }
+        finally { CloseDesktop(desktop); }
+    }
+
+    private static void RunCaptureServer(EventWaitHandle stop, SecurityIdentifier user, int session)
+    {
+        NamedPipeServerStream server = null;
+        uint activeHookThreadId = 0;
+        var registered = ThreadPool.RegisterWaitForSingleObject(stop, (_, _) =>
+        {
+            Volatile.Read(ref server)?.Dispose();
+            uint tid = Volatile.Read(ref activeHookThreadId);
+            if (tid != 0) _ = NativeMethods.PostThreadMessage(tid, 0x0012, IntPtr.Zero, IntPtr.Zero);
+        }, null, Timeout.Infinite, true);
+        try
+        {
+            while (!stop.WaitOne(0))
+            {
+                using var connection = server = CreateCapturePipe(user, session);
+                if (stop.WaitOne(0)) break;
+                System.Threading.Thread hookThread = null;
+                uint hookThreadId = 0;
+                int captureActive = 0;
+                try
+                {
+                    connection.WaitForConnection();
+                    server = null;
+                    if (stop.WaitOne(0)) break;
+                    if (!GetNamedPipeClientProcessId(connection.SafePipeHandle, out uint client)) throw new Win32Exception();
+                    using var verified = VerifyExecutable((int)client, session);
+                    byte[] frameBuffer = new byte[CaptureFrameSize];
+                    byte[] replyBuffer = new byte[1];
+                    Volatile.Write(ref captureActive, 1);
+                    bool hooksInstalled = false;
+                    using var hooksReady = new ManualResetEventSlim(false);
+                    hookThread = new System.Threading.Thread(() =>
+                    {
+                        int mouseHook = 0, keyboardHook = 0;
+                        NativeMethods.HookProc mouseProc = null, keyboardProc = null;
+                        try
+                        {
+                            _ = NativeMethods.PeekMessage(out _, IntPtr.Zero, 0, 0, 0);
+                            uint threadId = NativeMethods.GetCurrentThreadId();
+                            hookThreadId = threadId;
+                            IntPtr module =
+#if PORTABLE_SINGLE_FILE
+                                NativeMethods.GetModuleHandle(null);
+#else
+                                Marshal.GetHINSTANCE(typeof(PrivilegedInput).Assembly.GetModules()[0]);
+#endif
+                            mouseProc = (nCode, wParam, lParam) =>
+                            {
+                                if (nCode < 0 || Volatile.Read(ref captureActive) == 0)
+                                    return NativeMethods.CallNextHookEx(mouseHook, nCode, wParam, lParam);
+                                if (!agentAllowsApprovalScreens && !IsDefaultInputDesktop())
+                                    return NativeMethods.CallNextHookEx(mouseHook, nCode, wParam, lParam);
+                                CaptureMouseHookStruct data;
+                                unsafe { data = *(CaptureMouseHookStruct*)lParam; }
+                                var frame = new CaptureFrame(0, wParam, data.PtX, data.PtY, data.MouseData, data.Flags, (long)data.DwExtraInfo);
+                                if (!TryExchangeCaptureFrame(connection, frame, 140, frameBuffer, replyBuffer, out bool suppress))
+                                {
+                                    Volatile.Write(ref captureActive, 0);
+                                    _ = NativeMethods.PostThreadMessage(threadId, 0x0012, IntPtr.Zero, IntPtr.Zero);
+                                    return NativeMethods.CallNextHookEx(mouseHook, nCode, wParam, lParam);
+                                }
+                                return suppress ? 1 : NativeMethods.CallNextHookEx(mouseHook, nCode, wParam, lParam);
+                            };
+                            keyboardProc = (nCode, wParam, lParam) =>
+                            {
+                                if (nCode < 0 || Volatile.Read(ref captureActive) == 0)
+                                    return NativeMethods.CallNextHookEx(keyboardHook, nCode, wParam, lParam);
+                                if (!agentAllowsApprovalScreens && !IsDefaultInputDesktop())
+                                    return NativeMethods.CallNextHookEx(keyboardHook, nCode, wParam, lParam);
+                                CaptureKeyboardHookStruct data;
+                                unsafe { data = *(CaptureKeyboardHookStruct*)lParam; }
+                                var frame = new CaptureFrame(1, wParam, data.VkCode, data.ScanCode, data.Flags, data.Time, (long)data.DwExtraInfo);
+                                if (!TryExchangeCaptureFrame(connection, frame, 140, frameBuffer, replyBuffer, out bool suppress))
+                                {
+                                    Volatile.Write(ref captureActive, 0);
+                                    _ = NativeMethods.PostThreadMessage(threadId, 0x0012, IntPtr.Zero, IntPtr.Zero);
+                                    return NativeMethods.CallNextHookEx(keyboardHook, nCode, wParam, lParam);
+                                }
+                                return suppress ? 1 : NativeMethods.CallNextHookEx(keyboardHook, nCode, wParam, lParam);
+                            };
+                            mouseHook = NativeMethods.SetWindowsHookEx(WM.WH_MOUSE_LL, mouseProc, module, 0);
+                            keyboardHook = NativeMethods.SetWindowsHookEx(WM.WH_KEYBOARD_LL, keyboardProc, module, 0);
+                            if (mouseHook == 0 || keyboardHook == 0)
+                            {
+                                Logger.Log($"Privileged capture hook install failed: mouse={mouseHook}, keyboard={keyboardHook}, err={Marshal.GetLastWin32Error()}.");
+                                return;
+                            }
+                            Volatile.Write(ref activeHookThreadId, threadId);
+                            hooksInstalled = true;
+                            hooksReady.Set();
+                            while (Volatile.Read(ref captureActive) != 0 && NativeMethods.GetMessage(out var msg, IntPtr.Zero, 0, 0) > 0)
+                            {
+                                _ = NativeMethods.TranslateMessage(ref msg);
+                                _ = NativeMethods.DispatchMessage(ref msg);
+                            }
+                        }
+                        catch (Exception error)
+                        {
+                            Logger.Log("Privileged capture hook loop ended: " + error.Message);
+                        }
+                        finally
+                        {
+                            Volatile.Write(ref activeHookThreadId, 0);
+                            Volatile.Write(ref captureActive, 0);
+                            hooksReady.Set();
+                            if (mouseHook != 0) _ = NativeMethods.UnhookWindowsHookEx(mouseHook);
+                            if (keyboardHook != 0) _ = NativeMethods.UnhookWindowsHookEx(keyboardHook);
+                            GC.KeepAlive(mouseProc);
+                            GC.KeepAlive(keyboardProc);
+                        }
+                    })
+                    {
+                        IsBackground = true,
+                        Priority = System.Threading.ThreadPriority.Highest,
+                        Name = "MWBP-PrivilegedCaptureHook",
+                    };
+                    hookThread.Start();
+                    hooksReady.Wait();
+                    if (hooksInstalled)
+                    {
+                        while (!stop.WaitOne(100) && Volatile.Read(ref captureActive) != 0)
+                        {
+                            if (NativeMethods.WaitForSingleObject(verified.DangerousGetHandle(), 0) == 0) break;
+                            if (!PeekNamedPipe(connection.SafePipeHandle, IntPtr.Zero, 0, IntPtr.Zero, out _, out _)) break;
+                        }
+                    }
+                    else
+                    {
+                        _ = stop.WaitOne(1000);
+                    }
+                }
+                catch (Exception error) when (error is IOException or ObjectDisposedException or UnauthorizedAccessException or Win32Exception or InvalidOperationException or ArgumentException)
+                {
+                }
+                finally
+                {
+                    server = null;
+                    Volatile.Write(ref captureActive, 0);
+                    uint tid = Volatile.Read(ref hookThreadId);
+                    if (tid != 0) _ = NativeMethods.PostThreadMessage(tid, 0x0012, IntPtr.Zero, IntPtr.Zero);
+                    hookThread?.Join(1000);
+                }
+            }
+        }
+        finally
+        {
+            registered.Unregister(null);
+            server?.Dispose();
+        }
     }
 
     private static void RunAgent(string stopEventName, SecurityIdentifier user)
@@ -385,8 +646,14 @@ internal static class PrivilegedInput
             if (!released) failure = firstFailure;
             return released;
         }
+        var captureServer = new System.Threading.Thread(() => RunCaptureServer(stop, user, session))
+        {
+            IsBackground = true,
+            Name = "MWBP-CaptureServer",
+        };
         try
         {
+            captureServer.Start();
             while (!stop.WaitOne(0))
             {
                 using var connection = server = CreateAgentPipe(user, session);
@@ -421,7 +688,12 @@ internal static class PrivilegedInput
                 }
             }
         }
-        finally { registered.Unregister(null); server?.Dispose(); }
+        finally
+        {
+            registered.Unregister(null);
+            server?.Dispose();
+            captureServer.Join(1500);
+        }
     }
 
     // A native SendInput call cannot be cancelled by the pipe's 500ms deadline.
@@ -673,6 +945,7 @@ internal static class PrivilegedInput
     [DllImport("kernel32.dll")] private static extern IntPtr LocalFree(IntPtr memory);
     [DllImport("kernel32.dll", SetLastError = true)] private static extern bool GetNamedPipeClientProcessId(SafePipeHandle pipe, out uint processId);
     [DllImport("kernel32.dll", SetLastError = true)] private static extern bool GetNamedPipeServerProcessId(SafePipeHandle pipe, out uint processId);
+    [DllImport("kernel32.dll", SetLastError = true)] private static extern bool PeekNamedPipe(SafePipeHandle pipe, IntPtr buffer, uint bufferSize, IntPtr bytesRead, out uint totalBytesAvail, out uint bytesLeftThisMessage);
     [DllImport("user32.dll", SetLastError = true)] private static extern bool SetThreadDesktop(IntPtr desktop);
     [DllImport("user32.dll", SetLastError = true)] private static extern bool CloseDesktop(IntPtr desktop);
     // Unicode marshalling is required: the default would read the UTF-16 name back as ANSI.
