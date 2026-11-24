@@ -121,6 +121,63 @@ public sealed class InputStabilityRc28Tests
         var syncDown = new PrivilegedInput.CaptureFrame(PrivilegedInput.CaptureSyncDownKind, 0, (int)VK.LCONTROL, 0, 0, 0, 0);
         PrivilegedInput.WriteCaptureFrame(buffer, syncDown);
         Assert.AreEqual(syncDown, PrivilegedInput.ReadCaptureFrame(buffer));
+
+        // Aggregate generic VKs and mouse virtual keys must never be seeded on SYSTEM startup sync.
+        Assert.IsFalse(PrivilegedInput.ShouldSeedPhysicalKey(0x10)); // VK_SHIFT
+        Assert.IsFalse(PrivilegedInput.ShouldSeedPhysicalKey(0x11)); // VK_CONTROL
+        Assert.IsFalse(PrivilegedInput.ShouldSeedPhysicalKey(0x12)); // VK_MENU
+        Assert.IsFalse(PrivilegedInput.ShouldSeedPhysicalKey(0x01)); // VK_LBUTTON
+        Assert.IsTrue(PrivilegedInput.ShouldSeedPhysicalKey(0x14));  // VK_CAPITAL (Caps Lock)
+        Assert.IsTrue(PrivilegedInput.ShouldSeedPhysicalKey((int)VK.RCONTROL));
+    }
+
+    [TestMethod]
+    public void SuppressedRemoteKeysStayOffGetAsyncKeyStatePruningSoEmergencyChordAlwaysWorks()
+    {
+        var held = (HeldKeyChord)typeof(InputHook).GetField("easyMouseKeys", StaticFields)!.GetValue(null)!;
+        var previousKeys = held.DownKeys;
+        var hook = (InputHook)RuntimeHelpers.GetUninitializedObject(typeof(InputHook));
+        GC.SuppressFinalize(hook);
+        var liveKeysField = typeof(InputHook).GetField("livePhysicalKeys", InstanceFields)!;
+        var localModifiersField = typeof(InputHook).GetField("localModifiers", InstanceFields)!;
+        var hKeyboardHookField = typeof(InputHook).GetField("hKeyboardHook", InstanceFields)!;
+        var emergencyField = typeof(InputHook).GetField("emergencyBackspaceDown", InstanceFields)!;
+        try
+        {
+            held.Clear();
+            liveKeysField.SetValue(hook, new HashSet<int>());
+            hKeyboardHookField.SetValue(hook, 1); // Simulate active local hook path without privileged pipe.
+            synthetic.KeyboardShortcutsEnabled = false;
+            MachineStuff.desMachineID = MachineStuff.newDesMachineID = (ID)202; // Controlling peer: physical keys suppressed.
+            hook.KeyboardEvent += _ => { };
+
+            // Suppressed remote Ctrl + Alt must stay held in easyMouseKeys and NOT enter livePhysicalKeys
+            // (because OS GetAsyncKeyState stays 0 for suppressed keys), allowing Backspace to trigger emergency return.
+            Assert.IsTrue(hook.ProcessKeyboardHookData(WM.WM_KEYDOWN, (int)VK.LCONTROL, 0x1D, 0, 10, IntPtr.Zero));
+            var liveKeys = (HashSet<int>)liveKeysField.GetValue(hook)!;
+            Assert.IsFalse(liveKeys.Contains((int)VK.LCONTROL), "Suppressed remote key-down must not enter GetAsyncKeyState pruning set.");
+            Assert.AreEqual((byte)0, (byte)localModifiersField.GetValue(hook)!);
+
+            // Simulated reconcile (GetAsyncKeyState == 0 on all keys) before Alt arrives must NOT prune remote Ctrl.
+            hook.ReconcileHeldKeys(_ => false, activeDownVk: (int)VK.LMENU);
+            Assert.IsTrue(held.IsActive(EasyMouseOption.Ctrl, Array.Empty<int>()), "Held remote Ctrl must survive before Alt arrives.");
+
+            Assert.IsTrue(hook.ProcessKeyboardHookData(WM.WM_KEYDOWN, (int)VK.LMENU, 0x38, 0, 20, IntPtr.Zero));
+            Assert.IsTrue(held.IsActive(EasyMouseOption.Ctrl, Array.Empty<int>()));
+            Assert.IsTrue(held.IsActive(EasyMouseOption.Alt, Array.Empty<int>()));
+
+            // Emergency Ctrl+Alt+Backspace restores local control immediately.
+            Assert.IsTrue(hook.ProcessKeyboardHookData(WM.WM_KEYDOWN, (int)VK.BACK, 0x0E, 0, 30, IntPtr.Zero));
+            Assert.AreEqual((ID)101, Common.DesMachineID);
+            Assert.IsTrue((bool)emergencyField.GetValue(hook)!);
+        }
+        finally
+        {
+            hKeyboardHookField.SetValue(hook, 0);
+            emergencyField.SetValue(hook, false);
+            held.Clear();
+            foreach (int key in previousKeys) held.Update(key, true);
+        }
     }
 
     [TestMethod]

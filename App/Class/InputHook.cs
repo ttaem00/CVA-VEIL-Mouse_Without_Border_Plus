@@ -605,19 +605,27 @@ namespace MouseWithoutBorders.Class
                 return PassKeyboardEvent(modifier, up);
 
             Event.RealInputEventCount++;
-            if (IsLiveCaptureActive && (flags & 0x10) == 0)
+            bool physical = IsLiveCaptureActive && (flags & 0x10) == 0;
+            if (physical && !privilegedCaptureActive && !ForegroundInputAccess.RequiresBroker())
+                ReconcileLivePhysicalKeys(activeDownVk: vkCode);
+
+            bool TrackPhysicalKeyboardOutcome(bool suppress)
             {
-                if (!privilegedCaptureActive && !ForegroundInputAccess.RequiresBroker())
-                    ReconcileLivePhysicalKeys(activeDownVk: !up ? vkCode : -1);
-                if (!up) (livePhysicalKeys ??= new()).Add(vkCode);
-                else livePhysicalKeys?.Remove(vkCode);
+                // Only locally passed key-downs update OS GetAsyncKeyState; suppressed remote holds
+                // stay off the GetAsyncKeyState pruning set so Ctrl+Alt+Backspace remains reliable.
+                if (physical)
+                {
+                    if (!up && !suppress) (livePhysicalKeys ??= new()).Add(vkCode);
+                    else livePhysicalKeys?.Remove(vkCode);
+                }
+                return suppress;
             }
 
             bool physicalBackspace = (VK)vkCode == VK.BACK && (flags & 0x10) == 0;
             if (physicalBackspace && emergencyBackspaceDown)
             {
                 if (up) emergencyBackspaceDown = false;
-                return true;
+                return TrackPhysicalKeyboardOutcome(true);
             }
 
             // Reserved escape: extra stale keys and the configurable shortcut switch
@@ -630,7 +638,7 @@ namespace MouseWithoutBorders.Class
                 emergencyBackspaceDown = true;
                 Common.InputCallbackForm?.CheckInputHealth(force: true);
                 Logger.Log("Emergency keyboard return: restored local control.");
-                return true;
+                return TrackPhysicalKeyboardOutcome(true);
             }
 
             hookCallbackKeybdData.dwFlags = flags;
@@ -640,7 +648,7 @@ namespace MouseWithoutBorders.Class
             {
                 if (!ProcessKeyEx(vkCode, flags, hookCallbackKeybdData))
                 {
-                    return true;
+                    return TrackPhysicalKeyboardOutcome(true);
                 }
 
                 KeyboardEvent(hookCallbackKeybdData);
@@ -650,11 +658,11 @@ namespace MouseWithoutBorders.Class
             if (Common.DesMachineID == ID.NONE || Common.DesMachineID == ID.ALL || Common.DesMachineID == Common.MachineID
                 || up && (localModifiers & modifier) != 0)
             {
-                return PassKeyboardEvent(modifier, up);
+                return TrackPhysicalKeyboardOutcome(PassKeyboardEvent(modifier, up));
             }
             else
             {
-                return true;
+                return TrackPhysicalKeyboardOutcome(true);
             }
         }
 

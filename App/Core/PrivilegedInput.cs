@@ -463,6 +463,9 @@ internal static class PrivilegedInput
         }
     }
 
+    internal static bool ShouldSeedPhysicalKey(int vk) =>
+        vk is >= 8 and <= 254 and not (0x10 or 0x11 or 0x12 or 0xE7 or >= 0xF0);
+
     private static bool IsDefaultInputDesktop()
     {
         IntPtr desktop = NativeMethods.OpenInputDesktop(0, false, NativeMethods.DESKTOP_READOBJECTS);
@@ -486,8 +489,9 @@ internal static class PrivilegedInput
             while (!stop.WaitOne(0))
             {
                 bool backOff = false;
-                using (var connection = server = CreateCapturePipe(user, session))
+                using (var connection = CreateCapturePipe(user, session))
                 {
+                Volatile.Write(ref server, connection);
                 if (stop.WaitOne(0)) break;
                 System.Threading.Thread hookThread = null;
                 uint hookThreadId = 0;
@@ -495,7 +499,7 @@ internal static class PrivilegedInput
                 try
                 {
                     connection.WaitForConnection();
-                    server = null;
+                    Volatile.Write(ref server, null);
                     if (stop.WaitOne(0)) break;
                     if (!GetNamedPipeClientProcessId(connection.SafePipeHandle, out uint client)) throw new Win32Exception();
                     using var verified = VerifyExecutable((int)client, session);
@@ -510,13 +514,13 @@ internal static class PrivilegedInput
                         NativeMethods.HookProc mouseProc = null, keyboardProc = null;
                         var trackedKeys = new HashSet<int>();
                         int[] scratchKeys = new int[32];
-                        bool FlushGhostKeys(int activeDownVk = -1)
+                        bool FlushGhostKeys(int activeVk = -1)
                         {
                             if (trackedKeys.Count == 0) return true;
                             int count = 0;
                             foreach (int vk in trackedKeys)
                             {
-                                if (vk == activeDownVk || (NativeMethods.GetAsyncKeyState((IntPtr)vk) & 0x8000) != 0) continue;
+                                if (vk == activeVk || (NativeMethods.GetAsyncKeyState((IntPtr)vk) & 0x8000) != 0) continue;
                                 if (count == scratchKeys.Length) Array.Resize(ref scratchKeys, scratchKeys.Length * 2);
                                 scratchKeys[count++] = vk;
                             }
@@ -569,16 +573,11 @@ internal static class PrivilegedInput
                                 unsafe { data = *(CaptureKeyboardHookStruct*)lParam; }
                                 bool physical = (data.Flags & 0x10) == 0 && data.VkCode is >= 1 and <= 254;
                                 bool up = (data.Flags & (int)WM.LLKHF.UP) != 0;
-                                if (physical)
+                                if (physical && !FlushGhostKeys(activeVk: data.VkCode))
                                 {
-                                    if (!FlushGhostKeys(activeDownVk: !up ? data.VkCode : -1))
-                                    {
-                                        Volatile.Write(ref captureActive, 0);
-                                        _ = NativeMethods.PostThreadMessage(threadId, 0x0012, IntPtr.Zero, IntPtr.Zero);
-                                        return NativeMethods.CallNextHookEx(keyboardHook, nCode, wParam, lParam);
-                                    }
-                                    if (!up) trackedKeys.Add(data.VkCode);
-                                    else trackedKeys.Remove(data.VkCode);
+                                    Volatile.Write(ref captureActive, 0);
+                                    _ = NativeMethods.PostThreadMessage(threadId, 0x0012, IntPtr.Zero, IntPtr.Zero);
+                                    return NativeMethods.CallNextHookEx(keyboardHook, nCode, wParam, lParam);
                                 }
                                 var frame = new CaptureFrame(CaptureKeyboardKind, wParam, data.VkCode, data.ScanCode, data.Flags, data.Time, (long)data.DwExtraInfo);
                                 if (!TryExchangeCaptureFrame(connection, frame, 140, frameBuffer, replyBuffer, out bool suppress))
@@ -586,6 +585,13 @@ internal static class PrivilegedInput
                                     Volatile.Write(ref captureActive, 0);
                                     _ = NativeMethods.PostThreadMessage(threadId, 0x0012, IntPtr.Zero, IntPtr.Zero);
                                     return NativeMethods.CallNextHookEx(keyboardHook, nCode, wParam, lParam);
+                                }
+                                // Only track unsuppressed local key-downs via GetAsyncKeyState; Windows does not update
+                                // async key state for suppressed remote keys, so querying them would falsely prune holds.
+                                if (physical)
+                                {
+                                    if (!up && !suppress) trackedKeys.Add(data.VkCode);
+                                    else trackedKeys.Remove(data.VkCode);
                                 }
                                 return suppress ? 1 : NativeMethods.CallNextHookEx(keyboardHook, nCode, wParam, lParam);
                             };
@@ -600,7 +606,7 @@ internal static class PrivilegedInput
                             {
                                 for (int vk = 8; vk <= 254; vk++)
                                 {
-                                    if ((NativeMethods.GetAsyncKeyState((IntPtr)vk) & 0x8000) == 0) continue;
+                                    if (!ShouldSeedPhysicalKey(vk) || (NativeMethods.GetAsyncKeyState((IntPtr)vk) & 0x8000) == 0) continue;
                                     trackedKeys.Add(vk);
                                     if (!TryExchangeCaptureFrame(connection, new CaptureFrame(CaptureSyncDownKind, 0, vk, 0, 0, 0, 0),
                                         140, frameBuffer, replyBuffer, out _))
@@ -656,7 +662,7 @@ internal static class PrivilegedInput
                 }
                 finally
                 {
-                    server = null;
+                    Volatile.Write(ref server, null);
                     Volatile.Write(ref captureActive, 0);
                     uint tid = Volatile.Read(ref hookThreadId);
                     if (tid != 0) _ = NativeMethods.PostThreadMessage(tid, 0x0012, IntPtr.Zero, IntPtr.Zero);

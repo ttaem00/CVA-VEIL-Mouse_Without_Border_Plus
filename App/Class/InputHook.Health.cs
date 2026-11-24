@@ -62,7 +62,8 @@ internal partial class InputHook
 
     internal bool TryUpgradePrivilegedCapture()
     {
-        if (privilegedCaptureActive || !PrivilegedInput.IsProtectedCopy || InputHook.RecordingKeys) return false;
+        if (privilegedCaptureActive || !PrivilegedInput.IsProtectedCopy || InputHook.RecordingKeys
+            || Common.RunOnLogonDesktop || Common.RunOnScrSaverDesktop) return false;
         long now = Environment.TickCount64;
         if (lastCaptureUpgradeAttempt.HasValue && now - lastCaptureUpgradeAttempt.Value < 5000) return false;
         if (Common.CurrentProcess.SessionId != NativeMethods.WTSGetActiveConsoleSessionId() || !WinAPI.IsMyDesktopActive()) return false;
