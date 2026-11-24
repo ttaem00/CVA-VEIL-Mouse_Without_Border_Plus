@@ -1592,14 +1592,10 @@ internal static class Common
         // Notification suppression can outlive the game or apply to a different window.
         // Test the current foreground window, so returning to an ordinary window unblocks immediately.
         if (foregroundHandle == IntPtr.Zero || !NativeMethods.GetWindowRect(foregroundHandle, out var window)) return false;
-        if (IsMaximizedTitledWindow(NativeMethods.IsZoomed(foregroundHandle), NativeMethods.GetWindowLong(foregroundHandle, -16))) return false;
         var bounds = Screen.FromHandle(foregroundHandle).Bounds;
         return CoversScreen(Rectangle.FromLTRB(window.Left, window.Top, window.Right, window.Bottom), bounds)
             && !IsAppIgnoredByEasyMouseFullscreenCheck(foregroundHandle);
     }
-
-    internal static bool IsMaximizedTitledWindow(bool isZoomed, long windowStyle) =>
-        isZoomed && (windowStyle & 0x00C00000L) == 0x00C00000L;
 
     internal static bool CoversScreen(Rectangle window, Rectangle screen) =>
         screen.Width > 0 && screen.Height > 0 && window.Contains(screen);

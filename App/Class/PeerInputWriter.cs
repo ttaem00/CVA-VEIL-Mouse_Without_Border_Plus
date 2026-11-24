@@ -28,7 +28,6 @@ internal sealed class PeerInputWriter(SocketStuff owner, TcpSk peer)
         {
             if (stopped) return false;
             if (PureMove(copy) && pending.Last is { } tail && PureMove(tail.Value)) tail.Value = copy;
-            else if (IsCursorSync(copy) && pending.Last is { } sync && IsCursorSync(sync.Value)) sync.Value = copy;
             // Unsent distances add up; they are never replaced, and never grow the queue.
             else if (pending.Last is { } distance && RelativeMouse.TryMerge(distance.Value, copy, out var merged)) distance.Value = merged;
             else if (pending.Count < Capacity) pending.AddLast(copy);
@@ -74,9 +73,6 @@ internal sealed class PeerInputWriter(SocketStuff owner, TcpSk peer)
 
     private static bool PureMove(DATA packet) => packet.Type == PackageType.Mouse && packet.Md.dwFlags == WM.WM_MOUSEMOVE
         && packet.Md.X is >= 0 and <= 65535 && packet.Md.Y is >= 0 and <= 65535;
-
-    private static bool IsCursorSync(DATA packet) =>
-        packet.Type == PackageType.PointerCapture && packet.Md.WheelDelta == Event.RelativeCursorSyncTag;
 
     private void RememberHold(DATA packet)
     {
