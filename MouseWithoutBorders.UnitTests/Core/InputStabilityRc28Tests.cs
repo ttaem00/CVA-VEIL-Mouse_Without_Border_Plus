@@ -416,4 +416,31 @@ public sealed class InputStabilityRc28Tests
         Assert.AreEqual(InputSimulation.InjectedInputTag, assist.mi.dwExtraInfo);
         Assert.AreEqual(40, Marshal.SizeOf(assist));
     }
+
+    [TestMethod]
+    public void PrivilegedCaptureSkipsSecureDesktopsAndDefersUpgradeWhileControllingRemotePeer()
+    {
+        var hook = (InputHook)RuntimeHelpers.GetUninitializedObject(typeof(InputHook));
+        GC.SuppressFinalize(hook);
+        bool oldLogon = Common.RunOnLogonDesktop;
+        bool oldScrSaver = Common.RunOnScrSaverDesktop;
+        var tryStart = typeof(InputHook).GetMethod("TryStartPrivilegedCapture", InstanceFields)!;
+        try
+        {
+            MachineStuff.desMachineID = MachineStuff.newDesMachineID = (ID)202;
+            Assert.IsFalse(hook.TryUpgradePrivilegedCapture(), "Capture upgrade must defer while controlling a remote peer.");
+
+            Common.RunOnLogonDesktop = true;
+            Assert.IsFalse((bool)tryStart.Invoke(hook, null)!, "Logon desktop must not bind to the Default-desktop agent capture pipe.");
+            Common.RunOnLogonDesktop = false;
+
+            Common.RunOnScrSaverDesktop = true;
+            Assert.IsFalse((bool)tryStart.Invoke(hook, null)!, "Screen-saver desktop must not bind to the Default-desktop agent capture pipe.");
+        }
+        finally
+        {
+            Common.RunOnLogonDesktop = oldLogon;
+            Common.RunOnScrSaverDesktop = oldScrSaver;
+        }
+    }
 }

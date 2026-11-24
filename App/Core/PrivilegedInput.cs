@@ -492,10 +492,11 @@ internal static class PrivilegedInput
                 using (var connection = CreateCapturePipe(user, session))
                 {
                 Volatile.Write(ref server, connection);
-                if (stop.WaitOne(0)) break;
+                if (stop.WaitOne(0)) { Volatile.Write(ref server, null); break; }
                 System.Threading.Thread hookThread = null;
                 uint hookThreadId = 0;
                 int captureActive = 0;
+                using var hooksReady = new ManualResetEventSlim(false);
                 try
                 {
                     connection.WaitForConnection();
@@ -507,7 +508,6 @@ internal static class PrivilegedInput
                     byte[] replyBuffer = new byte[1];
                     Volatile.Write(ref captureActive, 1);
                     bool hooksInstalled = false;
-                    using var hooksReady = new ManualResetEventSlim(false);
                     hookThread = new System.Threading.Thread(() =>
                     {
                         int mouseHook = 0, keyboardHook = 0;

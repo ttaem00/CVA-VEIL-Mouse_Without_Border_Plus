@@ -226,7 +226,7 @@ namespace MouseWithoutBorders.Class
                 };
                 if (Setting.Values?.EasyMouseActivationKeys != null)
                     foreach (int key in Setting.Values.EasyMouseActivationKeys)
-                        if (key is >= 1 and <= 255) candidates.Add(key);
+                        if (PrivilegedInput.ShouldSeedPhysicalKey(key)) candidates.Add(key);
                 foreach (int key in candidates)
                 {
                     if ((NativeMethods.GetAsyncKeyState((IntPtr)key) & 0x8000) == 0) continue;
@@ -295,6 +295,7 @@ namespace MouseWithoutBorders.Class
 
         private bool TryStartPrivilegedCapture()
         {
+            if (Common.RunOnLogonDesktop || Common.RunOnScrSaverDesktop) return false;
             var form = Common.InputCallbackForm;
             if (form == null || form.IsDisposed || !form.IsHandleCreated) return false;
             IntPtr callbackHandle = form.Handle;
@@ -340,6 +341,7 @@ namespace MouseWithoutBorders.Class
         internal void FallbackFromPrivilegedCapture()
         {
             if (privilegedCaptureActive || (hMouseHook != 0 && hKeyboardHook != 0)) return;
+            RestoreLocalControl();
             Start(showError: false);
             if (!privilegedCaptureActive && hMouseHook != 0 && hKeyboardHook != 0)
                 Logger.Log("Privileged input capture unavailable; local hooks resumed.");
