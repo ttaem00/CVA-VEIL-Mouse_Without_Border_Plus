@@ -489,6 +489,7 @@ internal static class PrivilegedInput
             while (!stop.WaitOne(0))
             {
                 bool backOff = false;
+                using var hooksReady = new ManualResetEventSlim(false);
                 using (var connection = CreateCapturePipe(user, session))
                 {
                 Volatile.Write(ref server, connection);
@@ -496,7 +497,6 @@ internal static class PrivilegedInput
                 System.Threading.Thread hookThread = null;
                 uint hookThreadId = 0;
                 int captureActive = 0;
-                using var hooksReady = new ManualResetEventSlim(false);
                 try
                 {
                     connection.WaitForConnection();
@@ -512,6 +512,7 @@ internal static class PrivilegedInput
                     {
                         int mouseHook = 0, keyboardHook = 0;
                         NativeMethods.HookProc mouseProc = null, keyboardProc = null;
+                        bool readySignaled = false;
                         var trackedKeys = new HashSet<int>();
                         int[] scratchKeys = new int[32];
                         bool FlushGhostKeys(int activeVk = -1)
@@ -528,8 +529,9 @@ internal static class PrivilegedInput
                             {
                                 int vk = scratchKeys[i];
                                 trackedKeys.Remove(vk);
-                                if (!TryExchangeCaptureFrame(connection, new CaptureFrame(CaptureGhostReleaseKind, 0, vk, 0, 0, 0, 0),
-                                    140, frameBuffer, replyBuffer, out _))
+                                if (Volatile.Read(ref captureActive) == 0
+                                    || !TryExchangeCaptureFrame(connection, new CaptureFrame(CaptureGhostReleaseKind, 0, vk, 0, 0, 0, 0),
+                                        140, frameBuffer, replyBuffer, out _))
                                     return false;
                             }
                             return true;
@@ -615,6 +617,7 @@ internal static class PrivilegedInput
                             }
                             Volatile.Write(ref activeHookThreadId, threadId);
                             hooksInstalled = true;
+                            readySignaled = true;
                             hooksReady.Set();
                             while (Volatile.Read(ref captureActive) != 0 && NativeMethods.GetMessage(out var msg, IntPtr.Zero, 0, 0) > 0)
                             {
@@ -630,9 +633,14 @@ internal static class PrivilegedInput
                         {
                             Volatile.Write(ref activeHookThreadId, 0);
                             Volatile.Write(ref captureActive, 0);
-                            hooksReady.Set();
                             if (mouseHook != 0) _ = NativeMethods.UnhookWindowsHookEx(mouseHook);
                             if (keyboardHook != 0) _ = NativeMethods.UnhookWindowsHookEx(keyboardHook);
+                            if (!readySignaled)
+                            {
+                                readySignaled = true;
+                                try { hooksReady.Set(); }
+                                catch (ObjectDisposedException) { }
+                            }
                             GC.KeepAlive(mouseProc);
                             GC.KeepAlive(keyboardProc);
                         }
@@ -666,6 +674,8 @@ internal static class PrivilegedInput
                     Volatile.Write(ref captureActive, 0);
                     uint tid = Volatile.Read(ref hookThreadId);
                     if (tid != 0) _ = NativeMethods.PostThreadMessage(tid, 0x0012, IntPtr.Zero, IntPtr.Zero);
+                    // Close the pipe before joining so blocked capture/flush exchanges unwind immediately.
+                    connection.Dispose();
                     hookThread?.Join(1000);
                 }
                 }
