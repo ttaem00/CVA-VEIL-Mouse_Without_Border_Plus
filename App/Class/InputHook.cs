@@ -217,24 +217,48 @@ namespace MouseWithoutBorders.Class
             CtrlDown = altDown = false;
             (livePhysicalKeys ??= new()).Clear();
             easyMouseKeys.Clear();
-            var candidates = new HashSet<int>
+            if (!privilegedCaptureActive && !ForegroundInputAccess.RequiresBroker())
             {
-                (int)VK.LSHIFT, (int)VK.RSHIFT, (int)VK.LCONTROL, (int)VK.RCONTROL,
-                (int)VK.LMENU, (int)VK.RMENU, (int)VK.LWIN, (int)VK.RWIN,
-            };
-            if (Setting.Values?.EasyMouseActivationKeys != null)
-                foreach (int key in Setting.Values.EasyMouseActivationKeys)
-                    if (key is >= 1 and <= 255) candidates.Add(key);
-            foreach (int key in candidates)
-            {
-                if ((NativeMethods.GetAsyncKeyState((IntPtr)key) & 0x8000) == 0) continue;
-                livePhysicalKeys.Add(key);
-                localModifiers |= ModifierBit(key);
-                _ = easyMouseKeys.Update(key, true);
-                if ((VK)key is VK.LCONTROL or VK.RCONTROL) CtrlDown = true;
-                if ((VK)key is VK.LMENU or VK.RMENU) altDown = true;
+                var candidates = new HashSet<int>
+                {
+                    (int)VK.LSHIFT, (int)VK.RSHIFT, (int)VK.LCONTROL, (int)VK.RCONTROL,
+                    (int)VK.LMENU, (int)VK.RMENU, (int)VK.LWIN, (int)VK.RWIN,
+                };
+                if (Setting.Values?.EasyMouseActivationKeys != null)
+                    foreach (int key in Setting.Values.EasyMouseActivationKeys)
+                        if (key is >= 1 and <= 255) candidates.Add(key);
+                foreach (int key in candidates)
+                {
+                    if ((NativeMethods.GetAsyncKeyState((IntPtr)key) & 0x8000) == 0) continue;
+                    ApplySyncedPhysicalKeyDown(key);
+                }
             }
             Event.SetMouseSwitchActivation(EasyMouseKeyDown);
+        }
+
+        private void ApplySyncedPhysicalKeyDown(int vkCode)
+        {
+            if (vkCode is < 1 or > 254) return;
+            bool wasActive = EasyMouseKeyDown;
+            (livePhysicalKeys ??= new()).Add(vkCode);
+            localModifiers |= ModifierBit(vkCode);
+            _ = easyMouseKeys.Update(vkCode, true);
+            if ((VK)vkCode is VK.LCONTROL or VK.RCONTROL) CtrlDown = true;
+            if ((VK)vkCode is VK.LMENU or VK.RMENU) altDown = true;
+            bool active = EasyMouseKeyDown;
+            if (wasActive != active) Event.SetMouseSwitchActivation(active);
+        }
+
+        internal void ReleaseGhostPhysicalKey(int vkCode)
+        {
+            bool wasActive = EasyMouseKeyDown;
+            livePhysicalKeys?.Remove(vkCode);
+            _ = easyMouseKeys.Update(vkCode, false);
+            localModifiers = (byte)(localModifiers & ~ModifierBit(vkCode));
+            if ((VK)vkCode is VK.LCONTROL or VK.RCONTROL) CtrlDown = easyMouseKeys.IsActive(EasyMouseOption.Ctrl, Array.Empty<int>());
+            if ((VK)vkCode is VK.LMENU or VK.RMENU) altDown = easyMouseKeys.IsActive(EasyMouseOption.Alt, Array.Empty<int>());
+            bool active = EasyMouseKeyDown;
+            if (wasActive != active) Event.SetMouseSwitchActivation(active);
         }
 
         private void UnhookLocalHooks()
@@ -286,14 +310,30 @@ namespace MouseWithoutBorders.Class
 
         internal void DrainPendingCaptureFrames() => Volatile.Read(ref captureSession)?.DrainPendingFrame();
 
-        private bool DispatchCaptureFrame(PrivilegedInput.CaptureFrame frame) => frame.Kind == 0
-            ? ProcessMouseHookData(frame.WParam, frame.First, frame.Second, frame.Third, frame.Fourth, new IntPtr(frame.ExtraInfo))
-            : ProcessKeyboardHookData(frame.WParam, frame.First, frame.Second, frame.Third, frame.Fourth, new IntPtr(frame.ExtraInfo));
+        internal bool DispatchCaptureFrame(PrivilegedInput.CaptureFrame frame)
+        {
+            switch (frame.Kind)
+            {
+                case PrivilegedInput.CaptureMouseKind:
+                    return ProcessMouseHookData(frame.WParam, frame.First, frame.Second, frame.Third, frame.Fourth, new IntPtr(frame.ExtraInfo));
+                case PrivilegedInput.CaptureKeyboardKind:
+                    return ProcessKeyboardHookData(frame.WParam, frame.First, frame.Second, frame.Third, frame.Fourth, new IntPtr(frame.ExtraInfo));
+                case PrivilegedInput.CaptureGhostReleaseKind:
+                    ReleaseGhostPhysicalKey(frame.First);
+                    return false;
+                case PrivilegedInput.CaptureSyncDownKind:
+                    ApplySyncedPhysicalKeyDown(frame.First);
+                    return false;
+                default:
+                    return false;
+            }
+        }
 
         private void HandlePrivilegedCaptureDisconnected(PrivilegedCaptureSession disconnected)
         {
             if (Interlocked.CompareExchange(ref captureSession, null, disconnected) != disconnected) return;
             privilegedCaptureActive = false;
+            disconnected.Dispose();
             Common.InputCallbackForm?.NotifyPrivilegedCaptureLost();
         }
 
@@ -301,7 +341,8 @@ namespace MouseWithoutBorders.Class
         {
             if (privilegedCaptureActive || (hMouseHook != 0 && hKeyboardHook != 0)) return;
             Start(showError: false);
-            Logger.Log("Privileged input capture unavailable; active local hooks resumed.");
+            if (!privilegedCaptureActive && hMouseHook != 0 && hKeyboardHook != 0)
+                Logger.Log("Privileged input capture unavailable; local hooks resumed.");
         }
 
         internal void Stop()
@@ -341,7 +382,7 @@ namespace MouseWithoutBorders.Class
             private bool hasPendingFrame;
             private bool frameCompleted;
             private bool pendingSuppress;
-            private bool stopRequested;
+            private volatile bool stopRequested;
             private bool disposed;
             private System.Threading.Thread readerThread;
 
@@ -501,7 +542,7 @@ namespace MouseWithoutBorders.Class
             Event.RealInputEventCount++;
             try
             {
-                if (IsLiveCaptureActive && (flags & 1) == 0 && livePhysicalKeys != null && livePhysicalKeys.Count > 0)
+                if (IsLiveCaptureActive && !privilegedCaptureActive && (flags & 1) == 0 && livePhysicalKeys != null && livePhysicalKeys.Count > 0 && !ForegroundInputAccess.RequiresBroker())
                     ReconcileLivePhysicalKeys();
                 if (wParam == WM.WM_MOUSEMOVE && remotePointerBaseline is { } baseline)
                 {
@@ -566,7 +607,8 @@ namespace MouseWithoutBorders.Class
             Event.RealInputEventCount++;
             if (IsLiveCaptureActive && (flags & 0x10) == 0)
             {
-                ReconcileLivePhysicalKeys(activeDownVk: !up ? vkCode : -1);
+                if (!privilegedCaptureActive && !ForegroundInputAccess.RequiresBroker())
+                    ReconcileLivePhysicalKeys(activeDownVk: !up ? vkCode : -1);
                 if (!up) (livePhysicalKeys ??= new()).Add(vkCode);
                 else livePhysicalKeys?.Remove(vkCode);
             }

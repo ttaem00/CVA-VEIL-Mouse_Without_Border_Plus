@@ -99,6 +99,10 @@ internal static class PrivilegedInput
     private static string PipeName(int session) => "MouseWithoutBordersPlus/Input/v2/" + session;
     internal static string CapturePipeName(int session) => "MouseWithoutBordersPlus/Capture/v1/" + session;
     internal const int CaptureFrameSize = 32;
+    internal const byte CaptureMouseKind = 0;
+    internal const byte CaptureKeyboardKind = 1;
+    internal const byte CaptureGhostReleaseKind = 2;
+    internal const byte CaptureSyncDownKind = 3;
     internal const int ReplySize = 12;
     internal enum InjectionStage : uint { None, OpenDesktop, AttachDesktop, SendInput, RestoreDesktop, ApprovalScreenBlocked }
     internal readonly record struct InjectionFailure(InjectionStage Stage, int Error);
@@ -481,7 +485,9 @@ internal static class PrivilegedInput
         {
             while (!stop.WaitOne(0))
             {
-                using var connection = server = CreateCapturePipe(user, session);
+                bool backOff = false;
+                using (var connection = server = CreateCapturePipe(user, session))
+                {
                 if (stop.WaitOne(0)) break;
                 System.Threading.Thread hookThread = null;
                 uint hookThreadId = 0;
@@ -502,6 +508,28 @@ internal static class PrivilegedInput
                     {
                         int mouseHook = 0, keyboardHook = 0;
                         NativeMethods.HookProc mouseProc = null, keyboardProc = null;
+                        var trackedKeys = new HashSet<int>();
+                        int[] scratchKeys = new int[32];
+                        bool FlushGhostKeys(int activeDownVk = -1)
+                        {
+                            if (trackedKeys.Count == 0) return true;
+                            int count = 0;
+                            foreach (int vk in trackedKeys)
+                            {
+                                if (vk == activeDownVk || (NativeMethods.GetAsyncKeyState((IntPtr)vk) & 0x8000) != 0) continue;
+                                if (count == scratchKeys.Length) Array.Resize(ref scratchKeys, scratchKeys.Length * 2);
+                                scratchKeys[count++] = vk;
+                            }
+                            for (int i = 0; i < count; i++)
+                            {
+                                int vk = scratchKeys[i];
+                                trackedKeys.Remove(vk);
+                                if (!TryExchangeCaptureFrame(connection, new CaptureFrame(CaptureGhostReleaseKind, 0, vk, 0, 0, 0, 0),
+                                    140, frameBuffer, replyBuffer, out _))
+                                    return false;
+                            }
+                            return true;
+                        }
                         try
                         {
                             _ = NativeMethods.PeekMessage(out _, IntPtr.Zero, 0, 0, 0);
@@ -521,8 +549,9 @@ internal static class PrivilegedInput
                                     return NativeMethods.CallNextHookEx(mouseHook, nCode, wParam, lParam);
                                 CaptureMouseHookStruct data;
                                 unsafe { data = *(CaptureMouseHookStruct*)lParam; }
-                                var frame = new CaptureFrame(0, wParam, data.PtX, data.PtY, data.MouseData, data.Flags, (long)data.DwExtraInfo);
-                                if (!TryExchangeCaptureFrame(connection, frame, 140, frameBuffer, replyBuffer, out bool suppress))
+                                var frame = new CaptureFrame(CaptureMouseKind, wParam, data.PtX, data.PtY, data.MouseData, data.Flags, (long)data.DwExtraInfo);
+                                if (((data.Flags & 1) == 0 && !FlushGhostKeys())
+                                    || !TryExchangeCaptureFrame(connection, frame, 140, frameBuffer, replyBuffer, out bool suppress))
                                 {
                                     Volatile.Write(ref captureActive, 0);
                                     _ = NativeMethods.PostThreadMessage(threadId, 0x0012, IntPtr.Zero, IntPtr.Zero);
@@ -538,7 +567,20 @@ internal static class PrivilegedInput
                                     return NativeMethods.CallNextHookEx(keyboardHook, nCode, wParam, lParam);
                                 CaptureKeyboardHookStruct data;
                                 unsafe { data = *(CaptureKeyboardHookStruct*)lParam; }
-                                var frame = new CaptureFrame(1, wParam, data.VkCode, data.ScanCode, data.Flags, data.Time, (long)data.DwExtraInfo);
+                                bool physical = (data.Flags & 0x10) == 0 && data.VkCode is >= 1 and <= 254;
+                                bool up = (data.Flags & (int)WM.LLKHF.UP) != 0;
+                                if (physical)
+                                {
+                                    if (!FlushGhostKeys(activeDownVk: !up ? data.VkCode : -1))
+                                    {
+                                        Volatile.Write(ref captureActive, 0);
+                                        _ = NativeMethods.PostThreadMessage(threadId, 0x0012, IntPtr.Zero, IntPtr.Zero);
+                                        return NativeMethods.CallNextHookEx(keyboardHook, nCode, wParam, lParam);
+                                    }
+                                    if (!up) trackedKeys.Add(data.VkCode);
+                                    else trackedKeys.Remove(data.VkCode);
+                                }
+                                var frame = new CaptureFrame(CaptureKeyboardKind, wParam, data.VkCode, data.ScanCode, data.Flags, data.Time, (long)data.DwExtraInfo);
                                 if (!TryExchangeCaptureFrame(connection, frame, 140, frameBuffer, replyBuffer, out bool suppress))
                                 {
                                     Volatile.Write(ref captureActive, 0);
@@ -553,6 +595,17 @@ internal static class PrivilegedInput
                             {
                                 Logger.Log($"Privileged capture hook install failed: mouse={mouseHook}, keyboard={keyboardHook}, err={Marshal.GetLastWin32Error()}.");
                                 return;
+                            }
+                            if (agentAllowsApprovalScreens || IsDefaultInputDesktop())
+                            {
+                                for (int vk = 8; vk <= 254; vk++)
+                                {
+                                    if ((NativeMethods.GetAsyncKeyState((IntPtr)vk) & 0x8000) == 0) continue;
+                                    trackedKeys.Add(vk);
+                                    if (!TryExchangeCaptureFrame(connection, new CaptureFrame(CaptureSyncDownKind, 0, vk, 0, 0, 0, 0),
+                                        140, frameBuffer, replyBuffer, out _))
+                                        return;
+                                }
                             }
                             Volatile.Write(ref activeHookThreadId, threadId);
                             hooksInstalled = true;
@@ -595,7 +648,7 @@ internal static class PrivilegedInput
                     }
                     else
                     {
-                        _ = stop.WaitOne(1000);
+                        backOff = true;
                     }
                 }
                 catch (Exception error) when (error is IOException or ObjectDisposedException or UnauthorizedAccessException or Win32Exception or InvalidOperationException or ArgumentException)
@@ -609,6 +662,8 @@ internal static class PrivilegedInput
                     if (tid != 0) _ = NativeMethods.PostThreadMessage(tid, 0x0012, IntPtr.Zero, IntPtr.Zero);
                     hookThread?.Join(1000);
                 }
+                }
+                if (backOff) _ = stop.WaitOne(1000);
             }
         }
         finally

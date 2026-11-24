@@ -10,7 +10,7 @@ internal partial class InputHook
     private long mouseHookSeenAt, keyboardHookSeenAt;
     private long pendingMouseSince, pendingKeyboardSince, latestMouseRaw, latestKeyboardRaw;
     private long lastHealthRepair;
-    private long lastCaptureUpgradeAttempt;
+    private long? lastCaptureUpgradeAttempt;
     private const int DeliveryGraceMilliseconds = 250;
 
     [StructLayout(LayoutKind.Sequential)]
@@ -64,7 +64,7 @@ internal partial class InputHook
     {
         if (privilegedCaptureActive || !PrivilegedInput.IsProtectedCopy || InputHook.RecordingKeys) return false;
         long now = Environment.TickCount64;
-        if (now - lastCaptureUpgradeAttempt < 5000) return false;
+        if (lastCaptureUpgradeAttempt.HasValue && now - lastCaptureUpgradeAttempt.Value < 5000) return false;
         if (Common.CurrentProcess.SessionId != NativeMethods.WTSGetActiveConsoleSessionId() || !WinAPI.IsMyDesktopActive()) return false;
         lastCaptureUpgradeAttempt = now;
         if (!TryStartPrivilegedCapture()) return false;

@@ -110,9 +110,72 @@ public sealed class InputStabilityRc28Tests
         PrivilegedInput.WriteCaptureFrame(buffer, mouse);
         Assert.AreEqual(mouse, PrivilegedInput.ReadCaptureFrame(buffer));
 
-        var keyboard = new PrivilegedInput.CaptureFrame(1, WM.WM_KEYDOWN, 0x14, 0x3A, 0x10, 4242, 0x43524430);
+        var keyboard = new PrivilegedInput.CaptureFrame(PrivilegedInput.CaptureKeyboardKind, WM.WM_KEYDOWN, 0x14, 0x3A, 0x10, 4242, 0x43524430);
         PrivilegedInput.WriteCaptureFrame(buffer, keyboard);
         Assert.AreEqual(keyboard, PrivilegedInput.ReadCaptureFrame(buffer));
+
+        var ghostRelease = new PrivilegedInput.CaptureFrame(PrivilegedInput.CaptureGhostReleaseKind, 0, 0x14, 0, 0, 0, 0);
+        PrivilegedInput.WriteCaptureFrame(buffer, ghostRelease);
+        Assert.AreEqual(ghostRelease, PrivilegedInput.ReadCaptureFrame(buffer));
+
+        var syncDown = new PrivilegedInput.CaptureFrame(PrivilegedInput.CaptureSyncDownKind, 0, (int)VK.LCONTROL, 0, 0, 0, 0);
+        PrivilegedInput.WriteCaptureFrame(buffer, syncDown);
+        Assert.AreEqual(syncDown, PrivilegedInput.ReadCaptureFrame(buffer));
+    }
+
+    [TestMethod]
+    public void PrivilegedCapturePreservesHeldActivationAcrossMouseAndKeyboardAndReleasesExplicitGhostFrame()
+    {
+        var held = (HeldKeyChord)typeof(InputHook).GetField("easyMouseKeys", StaticFields)!.GetValue(null)!;
+        var previousKeys = held.DownKeys;
+        var hook = (InputHook)RuntimeHelpers.GetUninitializedObject(typeof(InputHook));
+        GC.SuppressFinalize(hook);
+        var privilegedActiveField = typeof(InputHook).GetField("privilegedCaptureActive", InstanceFields)!;
+        var liveKeysField = typeof(InputHook).GetField("livePhysicalKeys", InstanceFields)!;
+        var localModifiersField = typeof(InputHook).GetField("localModifiers", InstanceFields)!;
+        var activationPendingField = typeof(Event).GetField("activationPending", StaticFields)!;
+        try
+        {
+            held.Clear();
+            liveKeysField.SetValue(hook, new HashSet<int>());
+            privilegedActiveField.SetValue(hook, true);
+            synthetic.EasyMouse = (int)EasyMouseOption.Custom;
+            synthetic.EasyMouseActivationKeys = [0x14];
+            synthetic.KeyboardShortcutsEnabled = false;
+            MachineStuff.desMachineID = MachineStuff.newDesMachineID = (ID)101;
+            Event.SetMouseSwitchActivation(false);
+            hook.KeyboardEvent += _ => { };
+
+            // Even when Medium-IL GetAsyncKeyState would return 0 over elevated windows,
+            // privileged capture must retain held keys across WM_MOUSEMOVE and additional keys.
+            Assert.IsFalse(hook.DispatchCaptureFrame(new PrivilegedInput.CaptureFrame(PrivilegedInput.CaptureSyncDownKind, 0, (int)VK.LCONTROL, 0, 0, 0, 0)));
+            Assert.IsFalse(hook.DispatchCaptureFrame(new PrivilegedInput.CaptureFrame(PrivilegedInput.CaptureKeyboardKind, WM.WM_KEYDOWN, 0x14, 0x3A, 0, 10, 0)));
+            Assert.IsTrue(InputHook.CtrlDown);
+            Assert.IsTrue(InputHook.EasyMouseKeyDown);
+            Assert.IsTrue((bool)activationPendingField.GetValue(null)!);
+
+            Assert.IsFalse(hook.DispatchCaptureFrame(new PrivilegedInput.CaptureFrame(PrivilegedInput.CaptureMouseKind, WM.WM_MOUSEMOVE, 100, 100, 0, 0, 0)));
+            Assert.IsTrue(InputHook.CtrlDown);
+            Assert.IsTrue(InputHook.EasyMouseKeyDown, "Privileged mouse moves must not prune held activation via Medium-IL GetAsyncKeyState.");
+            Assert.IsTrue((bool)activationPendingField.GetValue(null)!);
+
+            Assert.IsFalse(hook.DispatchCaptureFrame(new PrivilegedInput.CaptureFrame(PrivilegedInput.CaptureKeyboardKind, WM.WM_KEYDOWN, (int)VK.LMENU, 0x38, 0, 20, 0)));
+            Assert.IsTrue(InputHook.CtrlDown);
+            Assert.IsTrue(InputHook.EasyMouseKeyDown);
+
+            // Explicit SYSTEM ghost release removes only the missed key cleanly.
+            Assert.IsFalse(hook.DispatchCaptureFrame(new PrivilegedInput.CaptureFrame(PrivilegedInput.CaptureGhostReleaseKind, 0, 0x14, 0, 0, 0, 0)));
+            Assert.IsFalse(InputHook.EasyMouseKeyDown);
+            Assert.IsFalse((bool)activationPendingField.GetValue(null)!);
+            Assert.IsTrue(InputHook.CtrlDown);
+            Assert.AreNotEqual((byte)0, (byte)localModifiersField.GetValue(hook)!);
+        }
+        finally
+        {
+            privilegedActiveField.SetValue(hook, false);
+            held.Clear();
+            foreach (int key in previousKeys) held.Update(key, true);
+        }
     }
 
     [TestMethod]
